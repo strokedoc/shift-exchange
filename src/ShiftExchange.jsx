@@ -34,7 +34,6 @@ function fresh(names = NAMES) {
     claimLimit: 2,
     claimedCounts: {},
     offeredCounts: {},
-    receivedCounts: {},
     adminPin: DEFAULT_PIN,
   };
 }
@@ -61,7 +60,8 @@ export default function App() {
   const [newPin,     setNewPin]     = useState("");
   const [confPin,    setConfPin]    = useState("");
   const [draftLimit,         setDraftLimit]         = useState("2");
-  const [selectedClaimType,  setSelectedClaimType]  = useState(null);
+  const [selectedGrabType,   setSelectedGrabType]   = useState(null);
+  const [selectedOfferType,  setSelectedOfferType]  = useState(null);
   const [selectedClaimQty,   setSelectedClaimQty]   = useState(1);
 
   // ── Storage ──────────────────────────────────────────────
@@ -71,7 +71,7 @@ export default function App() {
       if (!snapshot.exists()) return null;
       const d = snapshot.val();
       // Firebase drops empty arrays; normalize pool back to array
-      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false, claimLimit: d.claimLimit ?? 2, claimedCounts: d.claimedCounts ?? {}, offeredCounts: d.offeredCounts ?? {}, receivedCounts: d.receivedCounts ?? {} };
+      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false, claimLimit: d.claimLimit ?? 2, claimedCounts: d.claimedCounts ?? {}, offeredCounts: d.offeredCounts ?? {} };
     } catch { return null; }
   };
 
@@ -128,47 +128,41 @@ export default function App() {
     if (ok) toast2("Offer retracted");
   };
 
-  const claimByType = async (type, qty) => {
-    const myOffered = state.offeredCounts?.[me.id] ?? 0;
+  const claimByType = async (grabType, offerType, qty) => {
+    const myOfferedTotal = state.offeredCounts?.[me.id] ?? 0;
     const myClaimed = state.claimedCounts?.[me.id] ?? 0;
-    if (qty > myOffered - myClaimed)
-      return toast2("Offer shifts first — you can only claim as many as you've offered","err");
+    const offerBudget = myOfferedTotal - myClaimed;
+    if (qty > offerBudget)
+      return toast2("You can only claim as many shifts as you've offered","err");
     if (state.claimLimit > 0 && myClaimed + qty > state.claimLimit)
       return toast2(`Limit reached — max ${state.claimLimit} shifts in Round 2`,"err");
-    // Consume pool items of this type FIFO (oldest first), skipping own offers
+    // Consume grabType pool items FIFO (oldest first), skipping own offers
     const available = (state.pool??[])
-      .filter(p => p.type === type && p.fromId !== me.id)
+      .filter(p => p.type === grabType && p.fromId !== me.id)
       .sort((a, b) => a.at - b.at);
     let remaining = qty;
     let newPool = [...(state.pool??[])];
-    const receivedIncrements = {};
     for (const item of available) {
       if (remaining <= 0) break;
-      const consume = Math.min(item.qty, remaining);
-      receivedIncrements[item.fromId] = (receivedIncrements[item.fromId] ?? 0) + consume;
       if (item.qty <= remaining) {
         newPool = newPool.filter(p => p.id !== item.id);
       } else {
         newPool = newPool.map(p => p.id === item.id ? {...p, qty: p.qty - remaining} : p);
       }
-      remaining -= consume;
+      remaining -= Math.min(item.qty, remaining);
     }
-    if (remaining > 0) return toast2(`Only ${qty - remaining} ${getType(type).label} available`,"err");
-    const newReceivedCounts = {...(state.receivedCounts??{})};
-    for (const [id, inc] of Object.entries(receivedIncrements)) {
-      newReceivedCounts[id] = (newReceivedCounts[id] ?? 0) + inc;
-    }
+    if (remaining > 0) return toast2(`Only ${qty - remaining} ${getType(grabType).label} available`,"err");
     const ok = await push({
       ...state,
-      physicians: state.physicians.map(p => p.id===me.id ? {...p,[type]:p[type]+qty} : p),
+      physicians: state.physicians.map(p => p.id===me.id ? {...p,[grabType]:p[grabType]+qty} : p),
       pool: newPool,
       claimedCounts: { ...(state.claimedCounts??{}), [me.id]: myClaimed + qty },
-      receivedCounts: newReceivedCounts,
     });
     if (ok) {
-      setSelectedClaimType(null);
+      setSelectedGrabType(null);
+      setSelectedOfferType(null);
       setSelectedClaimQty(1);
-      toast2(`Claimed ${qty}× ${getType(type).label}`);
+      toast2(`Claimed ${qty}× ${getType(grabType).label}`);
     }
   };
 
@@ -247,14 +241,12 @@ export default function App() {
 
   const ofT = getType(ofType);
 
-  // Even-exchange balance
-  const myOffered     = state.offeredCounts?.[me.id]  ?? 0;
-  const myReceived    = state.receivedCounts?.[me.id]  ?? 0; // how many of MY offers others have taken
-  const myClaimed     = state.claimedCounts?.[me.id]   ?? 0;
-  const offerBalance  = myReceived - myClaimed;              // can only claim what's been taken from me
-  const adminRem      = state.claimOpen && state.claimLimit > 0
-                          ? state.claimLimit - myClaimed : Infinity;
-  const claimableLeft = Math.min(offerBalance, adminRem);
+  // Even-exchange tracking
+  const myOffered   = state.offeredCounts?.[me.id] ?? 0;
+  const myClaimed   = state.claimedCounts?.[me.id] ?? 0;
+  const offerBudget = myOffered - myClaimed; // how many more I'm allowed to claim
+  const adminRem    = state.claimOpen && state.claimLimit > 0
+                        ? state.claimLimit - myClaimed : Infinity;
 
   // Pool totals by type (excluding own offers)
   const poolByType = Object.fromEntries(TYPES.map(t => [
@@ -264,10 +256,22 @@ export default function App() {
   const myOffersByType = Object.fromEntries(TYPES.map(t => [
     t.key, (state.pool??[]).filter(p => p.type===t.key && p.fromId===me.id).reduce((s,p)=>s+p.qty,0)
   ]));
-  // Selected claim helpers
-  const selT          = selectedClaimType ? getType(selectedClaimType) : null;
-  const maxForSelType = selectedClaimType ? Math.min(poolByType[selectedClaimType], claimableLeft) : 0;
-  const safeCqty      = Math.min(selectedClaimQty, maxForSelType);
+  // Wants pool: how much each type is being sought by others' pool items
+  const wantsPoolByType = Object.fromEntries(TYPES.map(t => [
+    t.key, (state.pool??[]).filter(p => p.wantType===t.key && p.fromId!==me.id).reduce((s,p)=>s+p.qty,0)
+  ]));
+
+  const grabT  = selectedGrabType  ? getType(selectedGrabType)  : null;
+  const offerT = selectedOfferType ? getType(selectedOfferType) : null;
+  const maxClaim = (selectedGrabType && selectedOfferType)
+    ? Math.min(
+        poolByType[selectedGrabType],
+        myOffersByType[selectedOfferType],
+        offerBudget,
+        adminRem === Infinity ? 999 : adminRem
+      )
+    : 0;
+  const safeCqty = Math.min(selectedClaimQty, maxClaim);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -389,8 +393,8 @@ export default function App() {
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-sm font-semibold text-slate-700">Available to Claim</h2>
               {state.claimOpen && (
-                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${claimableLeft > 0 ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-400"}`}>
-                  {claimableLeft > 0 ? `${claimableLeft} left to claim` : myOffered === 0 ? "offer shifts to unlock" : myReceived === 0 ? "waiting for your offers to be taken" : "balanced"}
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${offerBudget > 0 ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-400"}`}>
+                  {offerBudget > 0 ? `${offerBudget} remaining` : myOffered === 0 ? "offer shifts to unlock" : "balanced"}
                 </span>
               )}
             </div>
@@ -408,16 +412,16 @@ export default function App() {
             </p>
           ) : (
             <>
-              {/* Grab — pool totals by type */}
+              {/* Row 1: Grab — pool totals by type */}
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Grab</p>
-              <div className="grid grid-cols-3 gap-2 mb-3">
+              <div className="grid grid-cols-3 gap-2 mb-4">
                 {TYPES.map(t => {
                   const avail = poolByType[t.key];
-                  const sel = selectedClaimType === t.key;
-                  const canPick = Math.min(avail, claimableLeft) > 0;
+                  const sel = selectedGrabType === t.key;
+                  const canPick = avail > 0 && offerBudget > 0;
                   return (
                     <button key={t.key}
-                      onClick={()=>{ setSelectedClaimType(sel ? null : t.key); setSelectedClaimQty(1); }}
+                      onClick={()=>{ setSelectedGrabType(sel ? null : t.key); setSelectedOfferType(null); setSelectedClaimQty(1); }}
                       disabled={!canPick}
                       className={`rounded-xl p-3 text-center transition-all disabled:opacity-35 ${sel ? `${t.btn} text-white shadow-md scale-[1.03]` : `${t.cardBg} hover:opacity-80`}`}>
                       <p className={`text-3xl font-bold ${sel ? "text-white" : t.cardText}`}>{avail}</p>
@@ -427,22 +431,47 @@ export default function App() {
                 })}
               </div>
 
-              {/* Qty stepper + claim (visible when a type is selected) */}
-              {selT && (
+              {/* Row 2: Available to Offer — wants pool by type (appears after grab selection) */}
+              {selectedGrabType && (
+                <>
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Available to Offer</p>
+                  <div className="grid grid-cols-3 gap-2 mb-4">
+                    {TYPES.map(t => {
+                      const wants = wantsPoolByType[t.key];
+                      const myHave = myOffersByType[t.key];
+                      const sel = selectedOfferType === t.key;
+                      const canOffer = wants > 0 && myHave > 0;
+                      return (
+                        <button key={t.key}
+                          onClick={()=>{ setSelectedOfferType(sel ? null : t.key); setSelectedClaimQty(1); }}
+                          disabled={!canOffer}
+                          className={`rounded-xl p-3 text-center transition-all disabled:opacity-35 ${sel ? `${t.btn} text-white shadow-md scale-[1.03]` : `${t.cardBg} hover:opacity-80`}`}>
+                          <p className={`text-3xl font-bold ${sel ? "text-white" : t.cardText}`}>{wants}</p>
+                          <p className={`text-xs mt-1 ${sel ? "text-white/80" : t.cardText + " opacity-75"}`}>{t.label}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+
+              {/* Qty stepper + claim (visible when both grab and offer type selected) */}
+              {grabT && offerT && (
                 <div className="flex gap-2 items-center mb-4">
                   <div className="flex-1 flex items-center bg-slate-100 rounded-xl overflow-hidden">
                     <button onClick={()=>setSelectedClaimQty(q=>Math.max(1,q-1))} className="px-5 py-3 text-slate-700 text-xl font-bold hover:bg-slate-200 select-none">−</button>
                     <span className="flex-1 text-center text-lg font-bold text-slate-800 select-none">{safeCqty}</span>
-                    <button onClick={()=>setSelectedClaimQty(q=>Math.min(maxForSelType,q+1))} className="px-5 py-3 text-slate-700 text-xl font-bold hover:bg-slate-200 select-none">+</button>
+                    <button onClick={()=>setSelectedClaimQty(q=>Math.min(maxClaim,q+1))} className="px-5 py-3 text-slate-700 text-xl font-bold hover:bg-slate-200 select-none">+</button>
                   </div>
-                  <button onClick={()=>claimByType(selectedClaimType, safeCqty)} disabled={saving}
-                    className={`${selT.btn} text-white px-5 py-3 rounded-xl font-semibold text-sm disabled:opacity-40 shadow-sm`}>
+                  <button onClick={()=>claimByType(selectedGrabType, selectedOfferType, safeCqty)}
+                    disabled={saving || safeCqty === 0}
+                    className={`${grabT.btn} text-white px-5 py-3 rounded-xl font-semibold text-sm disabled:opacity-40 shadow-sm`}>
                     {saving ? "…" : "Claim"}
                   </button>
                 </div>
               )}
 
-              {/* My offers (offset) */}
+              {/* Row 3: My Offers — reference display */}
               {myOffered > 0 && (
                 <>
                   <div className="h-px bg-slate-100 mb-3" />
@@ -550,7 +579,7 @@ export default function App() {
 
                   {/* Round controls */}
                   {!state.exchangeOpen && (
-                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false, claimedCounts:{}, offeredCounts:{}, receivedCounts:{}})} disabled={saving}
+                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-amber-50 text-amber-700 hover:bg-amber-100">
                       🔓 Open Exchange — Round 1 (Offers Only)
                     </button>
@@ -572,13 +601,13 @@ export default function App() {
                     </div>
                   )}
                   {state.exchangeOpen && state.claimOpen && state.claimLimit > 0 && (
-                    <button onClick={()=>push({...state, claimLimit:0, claimedCounts:{}, receivedCounts:{}})} disabled={saving}
+                    <button onClick={()=>push({...state, claimLimit:0, claimedCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-violet-50 text-violet-700 hover:bg-violet-100">
                       🔄 Open Round 3 — Unrestricted Cleanup
                     </button>
                   )}
                   {state.exchangeOpen && (state.pool??[]).length === 0 && (
-                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}, receivedCounts:{}})} disabled={saving}
+                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-red-50 text-red-600 hover:bg-red-100">
                       🔒 Close Exchange
                     </button>
@@ -594,12 +623,12 @@ export default function App() {
                         for (const item of poolItems) {
                           physicians = physicians.map(p => p.id===item.fromId ? {...p,[item.type]:p[item.type]+item.qty} : p);
                         }
-                        push({...state, physicians, pool:[], exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}, receivedCounts:{}});
+                        push({...state, physicians, pool:[], exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}});
                       }} disabled={saving}
                         className="w-full py-3 rounded-xl text-sm font-semibold bg-red-50 text-red-600 hover:bg-red-100">
                         🔒 Close + Return All Pending Offers
                       </button>
-                      <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}, receivedCounts:{}})} disabled={saving}
+                      <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
                         className="w-full py-3 rounded-xl text-sm font-semibold bg-slate-50 text-slate-500 hover:bg-slate-100">
                         🔒 Close (leave pool as-is)
                       </button>
