@@ -30,6 +30,7 @@ function fresh(names = NAMES) {
     physicians: names.map((name,i) => ({ id:i+1, name, ts:i<4?5:4, tn:13, ip:i<4?8:9 })),
     pool: [],
     exchangeOpen: true,
+    claimOpen: false,
     adminPin: DEFAULT_PIN,
   };
 }
@@ -62,7 +63,7 @@ export default function App() {
       if (!snapshot.exists()) return null;
       const d = snapshot.val();
       // Firebase drops empty arrays; normalize pool back to array
-      return { ...d, pool: d.pool ? Object.values(d.pool) : [] };
+      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false };
     } catch { return null; }
   };
 
@@ -166,6 +167,13 @@ export default function App() {
     </div>
   );
 
+  // ── Exchange status ──────────────────────────────────────
+  const xStatus = !state.exchangeOpen
+    ? { label: "Closed",                   bg: "bg-red-100",   text: "text-red-600",   dot: "bg-red-500",   pulse: false }
+    : !state.claimOpen
+    ? { label: "Round 1 — Offers Only",    bg: "bg-amber-100", text: "text-amber-700", dot: "bg-amber-400", pulse: true  }
+    : { label: "Round 2 — Claiming Open",  bg: "bg-green-100", text: "text-green-700", dot: "bg-green-500", pulse: true  };
+
   // ── Name selection ───────────────────────────────────────
   if (!userId) return (
     <div className="min-h-screen bg-slate-50 p-4">
@@ -173,9 +181,9 @@ export default function App() {
         <h1 className="text-2xl font-bold text-center text-slate-800">Shift Exchange</h1>
         <p className="text-sm text-center text-slate-500 mt-1 mb-3">Tap your name to continue</p>
         <div className="flex justify-center mb-7">
-          <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${state.exchangeOpen?"bg-green-100 text-green-700":"bg-red-100 text-red-600"}`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${state.exchangeOpen?"bg-green-500 animate-pulse":"bg-red-500"}`} />
-            Exchange {state.exchangeOpen?"Open":"Closed"}
+          <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${xStatus.bg} ${xStatus.text}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${xStatus.dot} ${xStatus.pulse?"animate-pulse":""}`} />
+            {xStatus.label}
           </span>
         </div>
         <div className="space-y-2">
@@ -204,9 +212,9 @@ export default function App() {
             <p className="text-xs text-slate-400 mt-0.5">{me.name}</p>
           </div>
           <div className="flex items-center gap-1">
-            <span className={`text-xs px-2.5 py-1 rounded-full font-medium flex items-center gap-1.5 ${state.exchangeOpen?"bg-green-100 text-green-700":"bg-red-100 text-red-600"}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${state.exchangeOpen?"bg-green-500 animate-pulse":"bg-red-500"}`} />
-              {state.exchangeOpen?"Open":"Closed"}
+            <span className={`text-xs px-2.5 py-1 rounded-full font-medium flex items-center gap-1.5 ${xStatus.bg} ${xStatus.text}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${xStatus.dot} ${xStatus.pulse?"animate-pulse":""}`} />
+              {!state.exchangeOpen ? "Closed" : !state.claimOpen ? "Round 1" : "Round 2"}
             </span>
             <button onClick={()=>setModal(true)}
               className="ml-1 w-9 h-9 rounded-xl bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-500 transition-colors"
@@ -308,7 +316,11 @@ export default function App() {
           </div>
           {pool.length === 0 ? (
             <p className="text-center text-slate-400 text-sm py-8">
-              {state.exchangeOpen?"Nothing available right now":"Exchange is currently closed"}
+              {!state.exchangeOpen
+                ? "Exchange is currently closed"
+                : !state.claimOpen
+                ? "Round 1 — admin will open claiming once offers are reviewed"
+                : "Nothing available right now"}
             </p>
           ) : (
             <div className="space-y-3">
@@ -323,7 +335,7 @@ export default function App() {
                       </div>
                       <p className="text-xs text-slate-400 mt-0.5">offered by {item.fromName}</p>
                     </div>
-                    {state.exchangeOpen && (
+                    {state.exchangeOpen && state.claimOpen && (
                       <button onClick={()=>claim(item)} disabled={saving}
                         className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold shadow-sm disabled:opacity-40 active:scale-95 transition-all">
                         Claim
@@ -417,10 +429,25 @@ export default function App() {
 
                   <div className="h-px bg-slate-100" />
 
-                  <button onClick={()=>push({...state, exchangeOpen:!state.exchangeOpen})} disabled={saving}
-                    className={`w-full py-3 rounded-xl text-sm font-semibold ${state.exchangeOpen?"bg-red-50 text-red-600 hover:bg-red-100":"bg-green-50 text-green-700 hover:bg-green-100"}`}>
-                    {state.exchangeOpen?"🔒 Close Exchange":"🔓 Open Exchange"}
-                  </button>
+                  {/* Round controls */}
+                  {!state.exchangeOpen && (
+                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false})} disabled={saving}
+                      className="w-full py-3 rounded-xl text-sm font-semibold bg-amber-50 text-amber-700 hover:bg-amber-100">
+                      🔓 Open Exchange — Round 1 (Offers Only)
+                    </button>
+                  )}
+                  {state.exchangeOpen && !state.claimOpen && (
+                    <button onClick={()=>push({...state, claimOpen:true})} disabled={saving}
+                      className="w-full py-3 rounded-xl text-sm font-semibold bg-green-50 text-green-700 hover:bg-green-100">
+                      ✅ Open Claiming — Round 2
+                    </button>
+                  )}
+                  {state.exchangeOpen && (
+                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false})} disabled={saving}
+                      className="w-full py-3 rounded-xl text-sm font-semibold bg-red-50 text-red-600 hover:bg-red-100">
+                      🔒 Close Exchange
+                    </button>
+                  )}
 
                   {panel !== "names" ? (
                     <button onClick={()=>{setTmpNames(state.physicians.map(p=>p.name));setPanel("names");}}
