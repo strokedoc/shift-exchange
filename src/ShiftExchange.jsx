@@ -31,6 +31,8 @@ function fresh(names = NAMES) {
     pool: [],
     exchangeOpen: true,
     claimOpen: false,
+    claimLimit: 2,
+    claimedCounts: {},
     adminPin: DEFAULT_PIN,
   };
 }
@@ -55,6 +57,7 @@ export default function App() {
   const [allocDraft, setAllocDraft] = useState([]);
   const [newPin,     setNewPin]     = useState("");
   const [confPin,    setConfPin]    = useState("");
+  const [draftLimit, setDraftLimit] = useState(2);
 
   // ── Storage ──────────────────────────────────────────────
   const pull = async () => {
@@ -63,7 +66,7 @@ export default function App() {
       if (!snapshot.exists()) return null;
       const d = snapshot.val();
       // Firebase drops empty arrays; normalize pool back to array
-      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false };
+      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false, claimLimit: d.claimLimit ?? 2, claimedCounts: d.claimedCounts ?? {} };
     } catch { return null; }
   };
 
@@ -120,10 +123,16 @@ export default function App() {
 
   const claim = async item => {
     if (item.fromId===me.id) return toast2("Can't claim your own offer","err");
+    if (state.claimLimit > 0) {
+      const soFar = state.claimedCounts?.[me.id] ?? 0;
+      if (soFar + item.qty > state.claimLimit)
+        return toast2(`Limit reached — max ${state.claimLimit} shifts in Round 2`, "err");
+    }
     const ok = await push({
       ...state,
       physicians: state.physicians.map(p => p.id===me.id ? {...p,[item.type]:p[item.type]+item.qty} : p),
       pool: (state.pool??[]).filter(p => p.id!==item.id),
+      claimedCounts: { ...(state.claimedCounts??{}), [me.id]: (state.claimedCounts?.[me.id]??0) + item.qty },
     });
     if (ok) toast2(`Claimed ${item.qty}× ${getType(item.type).label} from ${item.fromName}`);
   };
@@ -169,10 +178,12 @@ export default function App() {
 
   // ── Exchange status ──────────────────────────────────────
   const xStatus = !state.exchangeOpen
-    ? { label: "Closed",                   bg: "bg-red-100",   text: "text-red-600",   dot: "bg-red-500",   pulse: false }
+    ? { label: "Closed",                                        bg: "bg-red-100",    text: "text-red-600",    dot: "bg-red-500",    pulse: false }
     : !state.claimOpen
-    ? { label: "Round 1 — Offers Only",    bg: "bg-amber-100", text: "text-amber-700", dot: "bg-amber-400", pulse: true  }
-    : { label: "Round 2 — Claiming Open",  bg: "bg-green-100", text: "text-green-700", dot: "bg-green-500", pulse: true  };
+    ? { label: "Round 1 — Offers Only",                         bg: "bg-amber-100",  text: "text-amber-700",  dot: "bg-amber-400",  pulse: true  }
+    : state.claimLimit > 0
+    ? { label: `Round 2 — Max ${state.claimLimit} per person`,  bg: "bg-green-100",  text: "text-green-700",  dot: "bg-green-500",  pulse: true  }
+    : { label: "Round 3 — Unrestricted",                        bg: "bg-violet-100", text: "text-violet-700", dot: "bg-violet-500", pulse: true  };
 
   // ── Name selection ───────────────────────────────────────
   if (!userId) return (
@@ -214,7 +225,7 @@ export default function App() {
           <div className="flex items-center gap-1">
             <span className={`text-xs px-2.5 py-1 rounded-full font-medium flex items-center gap-1.5 ${xStatus.bg} ${xStatus.text}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${xStatus.dot} ${xStatus.pulse?"animate-pulse":""}`} />
-              {!state.exchangeOpen ? "Closed" : !state.claimOpen ? "Round 1" : "Round 2"}
+              {!state.exchangeOpen ? "Closed" : !state.claimOpen ? "Round 1" : state.claimLimit > 0 ? "Round 2" : "Round 3"}
             </span>
             <button onClick={()=>setModal(true)}
               className="ml-1 w-9 h-9 rounded-xl bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-500 transition-colors"
@@ -308,6 +319,11 @@ export default function App() {
             <div className="flex items-center gap-2">
               <h2 className="text-sm font-semibold text-slate-700">Available to Claim</h2>
               {pool.length > 0 && <span className="text-xs bg-sky-100 text-sky-700 px-2 py-0.5 rounded-full font-medium">{pool.length}</span>}
+              {state.claimOpen && state.claimLimit > 0 && (
+                <span className="text-xs text-slate-400">
+                  ({(state.claimedCounts?.[me?.id]??0)}/{state.claimLimit} claimed)
+                </span>
+              )}
             </div>
             <button onClick={async()=>{setSyncing(true);const d=await pull();if(d)setState(d);setSyncing(false);toast2("Synced ✓");}}
               disabled={syncing} className="text-xs text-slate-400 hover:text-slate-700 px-2 py-1 rounded-lg hover:bg-slate-100 disabled:opacity-40">
@@ -320,7 +336,9 @@ export default function App() {
                 ? "Exchange is currently closed"
                 : !state.claimOpen
                 ? "Round 1 — admin will open claiming once offers are reviewed"
-                : "Nothing available right now"}
+                : state.claimLimit > 0
+                ? "Nothing available right now"
+                : "Nothing left — all shifts have been claimed"}
             </p>
           ) : (
             <div className="space-y-3">
@@ -336,7 +354,8 @@ export default function App() {
                       <p className="text-xs text-slate-400 mt-0.5">offered by {item.fromName}</p>
                     </div>
                     {state.exchangeOpen && state.claimOpen && (
-                      <button onClick={()=>claim(item)} disabled={saving}
+                      <button onClick={()=>claim(item)}
+                        disabled={saving || (state.claimLimit > 0 && (state.claimedCounts?.[me.id]??0) >= state.claimLimit)}
                         className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold shadow-sm disabled:opacity-40 active:scale-95 transition-all">
                         Claim
                       </button>
@@ -431,19 +450,34 @@ export default function App() {
 
                   {/* Round controls */}
                   {!state.exchangeOpen && (
-                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false})} disabled={saving}
+                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false, claimedCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-amber-50 text-amber-700 hover:bg-amber-100">
                       🔓 Open Exchange — Round 1 (Offers Only)
                     </button>
                   )}
                   {state.exchangeOpen && !state.claimOpen && (
-                    <button onClick={()=>push({...state, claimOpen:true})} disabled={saving}
-                      className="w-full py-3 rounded-xl text-sm font-semibold bg-green-50 text-green-700 hover:bg-green-100">
-                      ✅ Open Claiming — Round 2
+                    <div className="bg-slate-50 rounded-xl p-3 space-y-2">
+                      <p className="text-xs text-slate-500 font-semibold uppercase tracking-wide">Round 2 claim limit</p>
+                      <div className="flex items-center gap-3">
+                        <input type="number" min="1" max="99" value={draftLimit}
+                          onChange={e=>setDraftLimit(Math.max(1,Number(e.target.value)||1))}
+                          className="w-20 border border-slate-200 bg-white rounded-lg px-3 py-2 text-sm text-center font-bold focus:outline-none focus:ring-2 focus:ring-sky-300" />
+                        <span className="text-xs text-slate-500">max shifts per person</span>
+                      </div>
+                      <button onClick={()=>push({...state, claimOpen:true, claimLimit:draftLimit, claimedCounts:{}})} disabled={saving}
+                        className="w-full py-2.5 rounded-xl text-sm font-semibold bg-green-50 text-green-700 hover:bg-green-100">
+                        ✅ Open Claiming — Round 2 (limit: {draftLimit})
+                      </button>
+                    </div>
+                  )}
+                  {state.exchangeOpen && state.claimOpen && state.claimLimit > 0 && (
+                    <button onClick={()=>push({...state, claimLimit:0, claimedCounts:{}})} disabled={saving}
+                      className="w-full py-3 rounded-xl text-sm font-semibold bg-violet-50 text-violet-700 hover:bg-violet-100">
+                      🔄 Open Round 3 — Unrestricted Cleanup
                     </button>
                   )}
                   {state.exchangeOpen && (
-                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false})} disabled={saving}
+                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-red-50 text-red-600 hover:bg-red-100">
                       🔒 Close Exchange
                     </button>
