@@ -7,7 +7,7 @@ const DEFAULT_PIN = "0000";
 const TYPES = [
   { key:"ts", label:"Telestroke", short:"TS", cardBg:"bg-sky-50",     cardText:"text-sky-700",     badge:"bg-sky-100 text-sky-700",        btn:"bg-sky-600 hover:bg-sky-700"      },
   { key:"tn", label:"Teleneuro",  short:"TN", cardBg:"bg-violet-50",  cardText:"text-violet-700",  badge:"bg-violet-100 text-violet-700",  btn:"bg-violet-600 hover:bg-violet-700" },
-  { key:"ip", label:"In-Person",  short:"IP", cardBg:"bg-emerald-50", cardText:"text-emerald-700", badge:"bg-emerald-100 text-emerald-700", btn:"bg-emerald-600 hover:bg-emerald-700"},
+  { key:"ip", label:"Cabarrus",   short:"CB", cardBg:"bg-emerald-50", cardText:"text-emerald-700", badge:"bg-emerald-100 text-emerald-700", btn:"bg-emerald-600 hover:bg-emerald-700"},
 ];
 const getType = k => TYPES.find(t => t.key === k);
 const NAMES = [
@@ -466,7 +466,7 @@ export default function App() {
               <span className="col-span-2">Physician</span>
               <span className="text-center text-sky-400">TS</span>
               <span className="text-center text-violet-400">TN</span>
-              <span className="text-center text-emerald-500">IP</span>
+              <span className="text-center text-emerald-500">CB</span>
             </div>
             {state.physicians.map(p => {
               const isMe = p.id === userId;
