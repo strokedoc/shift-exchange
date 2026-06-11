@@ -45,6 +45,7 @@ export default function App() {
   const [userId,   setUserId]  = useState(null);
   const [ofType,   setOfType]  = useState("ts");
   const [ofQty,    setOfQty]   = useState(1);
+  const [wantType, setWantType] = useState("tn");
   const [toast,    setToast]   = useState(null);
   const [syncing,  setSyncing] = useState(false);
 
@@ -109,7 +110,7 @@ export default function App() {
     const ok = await push({
       ...state,
       physicians: state.physicians.map(p => p.id===me.id ? {...p,[ofType]:p[ofType]-qty} : p),
-      pool: [...(state.pool??[]), {id:`${Date.now()}-${Math.random().toString(36).slice(2)}`, fromId:me.id, fromName:me.name, type:ofType, qty, at:Date.now()}],
+      pool: [...(state.pool??[]), {id:`${Date.now()}-${Math.random().toString(36).slice(2)}`, fromId:me.id, fromName:me.name, type:ofType, wantType, qty, at:Date.now()}],
       offeredCounts: { ...(state.offeredCounts??{}), [me.id]: (state.offeredCounts?.[me.id]??0) + qty },
     });
     if (ok) { toast2(`Offered ${qty}× ${getType(ofType).label}`); setOfQty(1); }
@@ -284,10 +285,20 @@ export default function App() {
         {state.exchangeOpen && (
           <section className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
             <h2 className="text-sm font-semibold text-slate-700 mb-3">Offer Shifts</h2>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5">Giving up</p>
             <div className="grid grid-cols-3 gap-1.5 mb-3">
               {TYPES.map(t => (
                 <button key={t.key} onClick={()=>{setOfType(t.key);setOfQty(1);}}
                   className={`py-2.5 rounded-xl text-sm font-medium transition-all ${ofType===t.key?`${t.btn} text-white shadow-sm`:"bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5">Wants in return</p>
+            <div className="grid grid-cols-3 gap-1.5 mb-3">
+              {TYPES.map(t => (
+                <button key={t.key} onClick={()=>setWantType(t.key)}
+                  className={`py-2.5 rounded-xl text-sm font-medium transition-all ${wantType===t.key?`${t.btn} text-white shadow-sm`:"bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
                   {t.label}
                 </button>
               ))}
@@ -304,7 +315,8 @@ export default function App() {
               </button>
             </div>
             <p className="text-xs text-center text-slate-400 mt-2">
-              You have <span className={`font-semibold ${ofT.cardText}`}>{me[ofType]}</span> {ofT.label} shifts
+              Offering <span className={`font-semibold ${ofT.cardText}`}>{ofQty}× {ofT.label}</span>
+              {" · "}wants <span className={`font-semibold ${getType(wantType).cardText}`}>{ofQty}× {getType(wantType).label}</span>
             </p>
           </section>
         )}
@@ -318,8 +330,10 @@ export default function App() {
                 const t = getType(item.type);
                 return (
                   <div key={item.id} className="flex items-center justify-between py-1">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5">
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${t.badge}`}>{t.short}</span>
+                      <span className="text-xs text-slate-300">→</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getType(item.wantType??item.type).badge}`}>{getType(item.wantType??item.type).short}</span>
                       <span className="text-sm font-medium text-slate-700">{item.qty} shift{item.qty>1?"s":""}</span>
                     </div>
                     <button onClick={()=>retract(item)} disabled={saving}
@@ -370,11 +384,13 @@ export default function App() {
                 return (
                   <div key={item.id} className="flex items-center justify-between gap-2">
                     <div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${t.badge}`}>{t.short}</span>
+                        <span className="text-xs text-slate-300">→</span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getType(item.wantType??item.type).badge}`}>{getType(item.wantType??item.type).short}</span>
                         <span className="text-sm font-semibold text-slate-800">{item.qty} shift{item.qty>1?"s":""}</span>
                       </div>
-                      <p className="text-xs text-slate-400 mt-0.5">offered by {item.fromName}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">from {item.fromName}</p>
                     </div>
                     {state.exchangeOpen && state.claimOpen && (
                       <div className="flex items-center gap-1.5 flex-shrink-0">
