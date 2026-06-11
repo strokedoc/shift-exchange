@@ -34,6 +34,7 @@ function fresh(names = NAMES) {
     claimLimit: 2,
     claimedCounts: {},
     offeredCounts: {},
+    receivedCounts: {},
     adminPin: DEFAULT_PIN,
   };
 }
@@ -70,7 +71,7 @@ export default function App() {
       if (!snapshot.exists()) return null;
       const d = snapshot.val();
       // Firebase drops empty arrays; normalize pool back to array
-      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false, claimLimit: d.claimLimit ?? 2, claimedCounts: d.claimedCounts ?? {}, offeredCounts: d.offeredCounts ?? {} };
+      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false, claimLimit: d.claimLimit ?? 2, claimedCounts: d.claimedCounts ?? {}, offeredCounts: d.offeredCounts ?? {}, receivedCounts: d.receivedCounts ?? {} };
     } catch { return null; }
   };
 
@@ -140,22 +141,29 @@ export default function App() {
       .sort((a, b) => a.at - b.at);
     let remaining = qty;
     let newPool = [...(state.pool??[])];
+    const receivedIncrements = {};
     for (const item of available) {
       if (remaining <= 0) break;
+      const consume = Math.min(item.qty, remaining);
+      receivedIncrements[item.fromId] = (receivedIncrements[item.fromId] ?? 0) + consume;
       if (item.qty <= remaining) {
         newPool = newPool.filter(p => p.id !== item.id);
-        remaining -= item.qty;
       } else {
         newPool = newPool.map(p => p.id === item.id ? {...p, qty: p.qty - remaining} : p);
-        remaining = 0;
       }
+      remaining -= consume;
     }
     if (remaining > 0) return toast2(`Only ${qty - remaining} ${getType(type).label} available`,"err");
+    const newReceivedCounts = {...(state.receivedCounts??{})};
+    for (const [id, inc] of Object.entries(receivedIncrements)) {
+      newReceivedCounts[id] = (newReceivedCounts[id] ?? 0) + inc;
+    }
     const ok = await push({
       ...state,
       physicians: state.physicians.map(p => p.id===me.id ? {...p,[type]:p[type]+qty} : p),
       pool: newPool,
       claimedCounts: { ...(state.claimedCounts??{}), [me.id]: myClaimed + qty },
+      receivedCounts: newReceivedCounts,
     });
     if (ok) {
       setSelectedClaimType(null);
@@ -240,9 +248,10 @@ export default function App() {
   const ofT = getType(ofType);
 
   // Even-exchange balance
-  const myOffered     = state.offeredCounts?.[me.id] ?? 0;
-  const myClaimed     = state.claimedCounts?.[me.id] ?? 0;
-  const offerBalance  = myOffered - myClaimed;
+  const myOffered     = state.offeredCounts?.[me.id]  ?? 0;
+  const myReceived    = state.receivedCounts?.[me.id]  ?? 0; // how many of MY offers others have taken
+  const myClaimed     = state.claimedCounts?.[me.id]   ?? 0;
+  const offerBalance  = myReceived - myClaimed;              // can only claim what's been taken from me
   const adminRem      = state.claimOpen && state.claimLimit > 0
                           ? state.claimLimit - myClaimed : Infinity;
   const claimableLeft = Math.min(offerBalance, adminRem);
@@ -381,7 +390,7 @@ export default function App() {
               <h2 className="text-sm font-semibold text-slate-700">Available to Claim</h2>
               {state.claimOpen && (
                 <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${claimableLeft > 0 ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-400"}`}>
-                  {claimableLeft > 0 ? `${claimableLeft} left to claim` : myOffered === 0 ? "offer shifts to unlock" : "limit reached"}
+                  {claimableLeft > 0 ? `${claimableLeft} left to claim` : myOffered === 0 ? "offer shifts to unlock" : myReceived === 0 ? "waiting for your offers to be taken" : "balanced"}
                 </span>
               )}
             </div>
@@ -541,7 +550,7 @@ export default function App() {
 
                   {/* Round controls */}
                   {!state.exchangeOpen && (
-                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
+                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false, claimedCounts:{}, offeredCounts:{}, receivedCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-amber-50 text-amber-700 hover:bg-amber-100">
                       🔓 Open Exchange — Round 1 (Offers Only)
                     </button>
@@ -563,16 +572,38 @@ export default function App() {
                     </div>
                   )}
                   {state.exchangeOpen && state.claimOpen && state.claimLimit > 0 && (
-                    <button onClick={()=>push({...state, claimLimit:0, claimedCounts:{}})} disabled={saving}
+                    <button onClick={()=>push({...state, claimLimit:0, claimedCounts:{}, receivedCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-violet-50 text-violet-700 hover:bg-violet-100">
                       🔄 Open Round 3 — Unrestricted Cleanup
                     </button>
                   )}
-                  {state.exchangeOpen && (
-                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
+                  {state.exchangeOpen && (state.pool??[]).length === 0 && (
+                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}, receivedCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-red-50 text-red-600 hover:bg-red-100">
                       🔒 Close Exchange
                     </button>
+                  )}
+                  {state.exchangeOpen && (state.pool??[]).length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-amber-600 font-medium text-center">
+                        ⚠️ {(state.pool??[]).reduce((s,p)=>s+p.qty,0)} shifts still in the pool
+                      </p>
+                      <button onClick={()=>{
+                        const poolItems = state.pool ?? [];
+                        let physicians = [...state.physicians];
+                        for (const item of poolItems) {
+                          physicians = physicians.map(p => p.id===item.fromId ? {...p,[item.type]:p[item.type]+item.qty} : p);
+                        }
+                        push({...state, physicians, pool:[], exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}, receivedCounts:{}});
+                      }} disabled={saving}
+                        className="w-full py-3 rounded-xl text-sm font-semibold bg-red-50 text-red-600 hover:bg-red-100">
+                        🔒 Close + Return All Pending Offers
+                      </button>
+                      <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}, receivedCounts:{}})} disabled={saving}
+                        className="w-full py-3 rounded-xl text-sm font-semibold bg-slate-50 text-slate-500 hover:bg-slate-100">
+                        🔒 Close (leave pool as-is)
+                      </button>
+                    </div>
                   )}
 
                   {panel !== "names" ? (
