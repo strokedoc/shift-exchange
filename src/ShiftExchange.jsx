@@ -33,6 +33,7 @@ function fresh(names = NAMES) {
     claimOpen: false,
     claimLimit: 2,
     claimedCounts: {},
+    offeredCounts: {},
     adminPin: DEFAULT_PIN,
   };
 }
@@ -58,6 +59,7 @@ export default function App() {
   const [newPin,     setNewPin]     = useState("");
   const [confPin,    setConfPin]    = useState("");
   const [draftLimit, setDraftLimit] = useState(2);
+  const [claimQtys,  setClaimQtys]  = useState({}); // itemId → desired claim qty
 
   // ── Storage ──────────────────────────────────────────────
   const pull = async () => {
@@ -66,7 +68,7 @@ export default function App() {
       if (!snapshot.exists()) return null;
       const d = snapshot.val();
       // Firebase drops empty arrays; normalize pool back to array
-      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false, claimLimit: d.claimLimit ?? 2, claimedCounts: d.claimedCounts ?? {} };
+      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false, claimLimit: d.claimLimit ?? 2, claimedCounts: d.claimedCounts ?? {}, offeredCounts: d.offeredCounts ?? {} };
     } catch { return null; }
   };
 
@@ -108,6 +110,7 @@ export default function App() {
       ...state,
       physicians: state.physicians.map(p => p.id===me.id ? {...p,[ofType]:p[ofType]-qty} : p),
       pool: [...(state.pool??[]), {id:`${Date.now()}-${Math.random().toString(36).slice(2)}`, fromId:me.id, fromName:me.name, type:ofType, qty, at:Date.now()}],
+      offeredCounts: { ...(state.offeredCounts??{}), [me.id]: (state.offeredCounts?.[me.id]??0) + qty },
     });
     if (ok) { toast2(`Offered ${qty}× ${getType(ofType).label}`); setOfQty(1); }
   };
@@ -117,24 +120,33 @@ export default function App() {
       ...state,
       physicians: state.physicians.map(p => p.id===me.id ? {...p,[item.type]:p[item.type]+item.qty} : p),
       pool: (state.pool??[]).filter(p => p.id!==item.id),
+      offeredCounts: { ...(state.offeredCounts??{}), [me.id]: Math.max(0,(state.offeredCounts?.[me.id]??0) - item.qty) },
     });
     if (ok) toast2("Offer retracted");
   };
 
-  const claim = async item => {
+  const claim = async (item, claimQty) => {
     if (item.fromId===me.id) return toast2("Can't claim your own offer","err");
-    if (state.claimLimit > 0) {
-      const soFar = state.claimedCounts?.[me.id] ?? 0;
-      if (soFar + item.qty > state.claimLimit)
-        return toast2(`Limit reached — max ${state.claimLimit} shifts in Round 2`, "err");
-    }
+    const myOffered  = state.offeredCounts?.[me.id]  ?? 0;
+    const myClaimed  = state.claimedCounts?.[me.id]  ?? 0;
+    const balance    = myOffered - myClaimed;
+    if (claimQty > balance)
+      return toast2("Offer shifts first — you can only claim as many as you've offered","err");
+    if (state.claimLimit > 0 && myClaimed + claimQty > state.claimLimit)
+      return toast2(`Limit reached — max ${state.claimLimit} shifts in Round 2`,"err");
+    const poolUpdate = claimQty < item.qty
+      ? (state.pool??[]).map(p => p.id===item.id ? {...p, qty: p.qty - claimQty} : p)
+      : (state.pool??[]).filter(p => p.id!==item.id);
     const ok = await push({
       ...state,
-      physicians: state.physicians.map(p => p.id===me.id ? {...p,[item.type]:p[item.type]+item.qty} : p),
-      pool: (state.pool??[]).filter(p => p.id!==item.id),
-      claimedCounts: { ...(state.claimedCounts??{}), [me.id]: (state.claimedCounts?.[me.id]??0) + item.qty },
+      physicians: state.physicians.map(p => p.id===me.id ? {...p,[item.type]:p[item.type]+claimQty} : p),
+      pool: poolUpdate,
+      claimedCounts: { ...(state.claimedCounts??{}), [me.id]: myClaimed + claimQty },
     });
-    if (ok) toast2(`Claimed ${item.qty}× ${getType(item.type).label} from ${item.fromName}`);
+    if (ok) {
+      setClaimQtys(q => { const n={...q}; delete n[item.id]; return n; });
+      toast2(`Claimed ${claimQty}× ${getType(item.type).label} from ${item.fromName}`);
+    }
   };
 
   // ── Admin actions ────────────────────────────────────────
@@ -211,6 +223,14 @@ export default function App() {
   );
 
   const ofT = getType(ofType);
+
+  // Even-exchange balance
+  const myOffered     = state.offeredCounts?.[me.id] ?? 0;
+  const myClaimed     = state.claimedCounts?.[me.id] ?? 0;
+  const offerBalance  = myOffered - myClaimed;                          // how many I can still claim
+  const adminRem      = state.claimOpen && state.claimLimit > 0
+                          ? state.claimLimit - myClaimed : Infinity;
+  const claimableLeft = Math.min(offerBalance, adminRem);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -316,12 +336,12 @@ export default function App() {
         {/* Available to Claim */}
         <section className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-sm font-semibold text-slate-700">Available to Claim</h2>
               {pool.length > 0 && <span className="text-xs bg-sky-100 text-sky-700 px-2 py-0.5 rounded-full font-medium">{pool.length}</span>}
-              {state.claimOpen && state.claimLimit > 0 && (
-                <span className="text-xs text-slate-400">
-                  ({(state.claimedCounts?.[me?.id]??0)}/{state.claimLimit} claimed)
+              {state.claimOpen && (
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${claimableLeft > 0 ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-400"}`}>
+                  {claimableLeft > 0 ? `${claimableLeft} left to claim` : myOffered === 0 ? "offer shifts to unlock" : "limit reached"}
                 </span>
               )}
             </div>
@@ -344,8 +364,11 @@ export default function App() {
             <div className="space-y-3">
               {pool.map(item => {
                 const t = getType(item.type);
+                const maxForItem = Math.min(item.qty, claimableLeft);
+                const cqty = Math.min(claimQtys[item.id] ?? 1, maxForItem);
+                const canClaim = maxForItem > 0;
                 return (
-                  <div key={item.id} className="flex items-center justify-between">
+                  <div key={item.id} className="flex items-center justify-between gap-2">
                     <div>
                       <div className="flex items-center gap-2">
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${t.badge}`}>{t.short}</span>
@@ -354,11 +377,21 @@ export default function App() {
                       <p className="text-xs text-slate-400 mt-0.5">offered by {item.fromName}</p>
                     </div>
                     {state.exchangeOpen && state.claimOpen && (
-                      <button onClick={()=>claim(item)}
-                        disabled={saving || (state.claimLimit > 0 && (state.claimedCounts?.[me.id]??0) >= state.claimLimit)}
-                        className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold shadow-sm disabled:opacity-40 active:scale-95 transition-all">
-                        Claim
-                      </button>
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        {item.qty > 1 && canClaim && (
+                          <div className="flex items-center bg-slate-100 rounded-lg overflow-hidden text-sm">
+                            <button onClick={()=>setClaimQtys(q=>({...q,[item.id]:Math.max(1,(q[item.id]??1)-1)}))}
+                              className="px-2.5 py-1.5 text-slate-600 hover:bg-slate-200 font-bold select-none">−</button>
+                            <span className="px-2 font-bold text-slate-800 select-none min-w-[1.5rem] text-center">{cqty}</span>
+                            <button onClick={()=>setClaimQtys(q=>({...q,[item.id]:Math.min(maxForItem,(q[item.id]??1)+1)}))}
+                              className="px-2.5 py-1.5 text-slate-600 hover:bg-slate-200 font-bold select-none">+</button>
+                          </div>
+                        )}
+                        <button onClick={()=>claim(item, cqty)} disabled={saving || !canClaim}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold shadow-sm disabled:opacity-40 active:scale-95 transition-all">
+                          {canClaim ? "Claim" : myOffered === 0 ? "Offer first" : "Limit"}
+                        </button>
+                      </div>
                     )}
                   </div>
                 );
@@ -450,7 +483,7 @@ export default function App() {
 
                   {/* Round controls */}
                   {!state.exchangeOpen && (
-                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false, claimedCounts:{}})} disabled={saving}
+                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-amber-50 text-amber-700 hover:bg-amber-100">
                       🔓 Open Exchange — Round 1 (Offers Only)
                     </button>
@@ -477,7 +510,7 @@ export default function App() {
                     </button>
                   )}
                   {state.exchangeOpen && (
-                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}})} disabled={saving}
+                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-red-50 text-red-600 hover:bg-red-100">
                       🔒 Close Exchange
                     </button>
