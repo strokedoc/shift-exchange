@@ -59,8 +59,9 @@ export default function App() {
   const [allocDraft, setAllocDraft] = useState([]);
   const [newPin,     setNewPin]     = useState("");
   const [confPin,    setConfPin]    = useState("");
-  const [draftLimit, setDraftLimit] = useState(2);
-  const [claimQtys,  setClaimQtys]  = useState({}); // itemId → desired claim qty
+  const [draftLimit,         setDraftLimit]         = useState("2");
+  const [selectedClaimType,  setSelectedClaimType]  = useState(null);
+  const [selectedClaimQty,   setSelectedClaimQty]   = useState(1);
 
   // ── Storage ──────────────────────────────────────────────
   const pull = async () => {
@@ -126,27 +127,40 @@ export default function App() {
     if (ok) toast2("Offer retracted");
   };
 
-  const claim = async (item, claimQty) => {
-    if (item.fromId===me.id) return toast2("Can't claim your own offer","err");
-    const myOffered  = state.offeredCounts?.[me.id]  ?? 0;
-    const myClaimed  = state.claimedCounts?.[me.id]  ?? 0;
-    const balance    = myOffered - myClaimed;
-    if (claimQty > balance)
+  const claimByType = async (type, qty) => {
+    const myOffered = state.offeredCounts?.[me.id] ?? 0;
+    const myClaimed = state.claimedCounts?.[me.id] ?? 0;
+    if (qty > myOffered - myClaimed)
       return toast2("Offer shifts first — you can only claim as many as you've offered","err");
-    if (state.claimLimit > 0 && myClaimed + claimQty > state.claimLimit)
+    if (state.claimLimit > 0 && myClaimed + qty > state.claimLimit)
       return toast2(`Limit reached — max ${state.claimLimit} shifts in Round 2`,"err");
-    const poolUpdate = claimQty < item.qty
-      ? (state.pool??[]).map(p => p.id===item.id ? {...p, qty: p.qty - claimQty} : p)
-      : (state.pool??[]).filter(p => p.id!==item.id);
+    // Consume pool items of this type FIFO (oldest first), skipping own offers
+    const available = (state.pool??[])
+      .filter(p => p.type === type && p.fromId !== me.id)
+      .sort((a, b) => a.at - b.at);
+    let remaining = qty;
+    let newPool = [...(state.pool??[])];
+    for (const item of available) {
+      if (remaining <= 0) break;
+      if (item.qty <= remaining) {
+        newPool = newPool.filter(p => p.id !== item.id);
+        remaining -= item.qty;
+      } else {
+        newPool = newPool.map(p => p.id === item.id ? {...p, qty: p.qty - remaining} : p);
+        remaining = 0;
+      }
+    }
+    if (remaining > 0) return toast2(`Only ${qty - remaining} ${getType(type).label} available`,"err");
     const ok = await push({
       ...state,
-      physicians: state.physicians.map(p => p.id===me.id ? {...p,[item.type]:p[item.type]+claimQty} : p),
-      pool: poolUpdate,
-      claimedCounts: { ...(state.claimedCounts??{}), [me.id]: myClaimed + claimQty },
+      physicians: state.physicians.map(p => p.id===me.id ? {...p,[type]:p[type]+qty} : p),
+      pool: newPool,
+      claimedCounts: { ...(state.claimedCounts??{}), [me.id]: myClaimed + qty },
     });
     if (ok) {
-      setClaimQtys(q => { const n={...q}; delete n[item.id]; return n; });
-      toast2(`Claimed ${claimQty}× ${getType(item.type).label} from ${item.fromName}`);
+      setSelectedClaimType(null);
+      setSelectedClaimQty(1);
+      toast2(`Claimed ${qty}× ${getType(type).label}`);
     }
   };
 
@@ -228,10 +242,23 @@ export default function App() {
   // Even-exchange balance
   const myOffered     = state.offeredCounts?.[me.id] ?? 0;
   const myClaimed     = state.claimedCounts?.[me.id] ?? 0;
-  const offerBalance  = myOffered - myClaimed;                          // how many I can still claim
+  const offerBalance  = myOffered - myClaimed;
   const adminRem      = state.claimOpen && state.claimLimit > 0
                           ? state.claimLimit - myClaimed : Infinity;
   const claimableLeft = Math.min(offerBalance, adminRem);
+
+  // Pool totals by type (excluding own offers)
+  const poolByType = Object.fromEntries(TYPES.map(t => [
+    t.key, (state.pool??[]).filter(p => p.type===t.key && p.fromId!==me.id).reduce((s,p)=>s+p.qty,0)
+  ]));
+  // My outstanding offers by type
+  const myOffersByType = Object.fromEntries(TYPES.map(t => [
+    t.key, (state.pool??[]).filter(p => p.type===t.key && p.fromId===me.id).reduce((s,p)=>s+p.qty,0)
+  ]));
+  // Selected claim helpers
+  const selT          = selectedClaimType ? getType(selectedClaimType) : null;
+  const maxForSelType = selectedClaimType ? Math.min(poolByType[selectedClaimType], claimableLeft) : 0;
+  const safeCqty      = Math.min(selectedClaimQty, maxForSelType);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -352,7 +379,6 @@ export default function App() {
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-sm font-semibold text-slate-700">Available to Claim</h2>
-              {pool.length > 0 && <span className="text-xs bg-sky-100 text-sky-700 px-2 py-0.5 rounded-full font-medium">{pool.length}</span>}
               {state.claimOpen && (
                 <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${claimableLeft > 0 ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-400"}`}>
                   {claimableLeft > 0 ? `${claimableLeft} left to claim` : myOffered === 0 ? "offer shifts to unlock" : "limit reached"}
@@ -364,55 +390,71 @@ export default function App() {
               {syncing?"…":"↻ Refresh"}
             </button>
           </div>
-          {pool.length === 0 ? (
+
+          {!state.claimOpen ? (
             <p className="text-center text-slate-400 text-sm py-8">
               {!state.exchangeOpen
                 ? "Exchange is currently closed"
-                : !state.claimOpen
-                ? "Round 1 — admin will open claiming once offers are reviewed"
-                : state.claimLimit > 0
-                ? "Nothing available right now"
-                : "Nothing left — all shifts have been claimed"}
+                : "Round 1 — admin will open claiming once offers are reviewed"}
             </p>
           ) : (
-            <div className="space-y-3">
-              {pool.map(item => {
-                const t = getType(item.type);
-                const maxForItem = Math.min(item.qty, claimableLeft);
-                const cqty = Math.min(claimQtys[item.id] ?? 1, maxForItem);
-                const canClaim = maxForItem > 0;
-                return (
-                  <div key={item.id} className="flex items-center justify-between gap-2">
-                    <div>
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${t.badge}`}>{t.short}</span>
-                        <span className="text-xs text-slate-300">→</span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getType(item.wantType??item.type).badge}`}>{getType(item.wantType??item.type).short}</span>
-                        <span className="text-sm font-semibold text-slate-800">{item.qty} shift{item.qty>1?"s":""}</span>
-                      </div>
-                      <p className="text-xs text-slate-400 mt-0.5">from {item.fromName}</p>
-                    </div>
-                    {state.exchangeOpen && state.claimOpen && (
-                      <div className="flex items-center gap-1.5 flex-shrink-0">
-                        {item.qty > 1 && canClaim && (
-                          <div className="flex items-center bg-slate-100 rounded-lg overflow-hidden text-sm">
-                            <button onClick={()=>setClaimQtys(q=>({...q,[item.id]:Math.max(1,(q[item.id]??1)-1)}))}
-                              className="px-2.5 py-1.5 text-slate-600 hover:bg-slate-200 font-bold select-none">−</button>
-                            <span className="px-2 font-bold text-slate-800 select-none min-w-[1.5rem] text-center">{cqty}</span>
-                            <button onClick={()=>setClaimQtys(q=>({...q,[item.id]:Math.min(maxForItem,(q[item.id]??1)+1)}))}
-                              className="px-2.5 py-1.5 text-slate-600 hover:bg-slate-200 font-bold select-none">+</button>
-                          </div>
-                        )}
-                        <button onClick={()=>claim(item, cqty)} disabled={saving || !canClaim}
-                          className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold shadow-sm disabled:opacity-40 active:scale-95 transition-all">
-                          {canClaim ? "Claim" : myOffered === 0 ? "Offer first" : "Limit"}
-                        </button>
-                      </div>
-                    )}
+            <>
+              {/* Grab — pool totals by type */}
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Grab</p>
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                {TYPES.map(t => {
+                  const avail = poolByType[t.key];
+                  const sel = selectedClaimType === t.key;
+                  const canPick = Math.min(avail, claimableLeft) > 0;
+                  return (
+                    <button key={t.key}
+                      onClick={()=>{ setSelectedClaimType(sel ? null : t.key); setSelectedClaimQty(1); }}
+                      disabled={!canPick}
+                      className={`rounded-xl p-3 text-center transition-all disabled:opacity-35 ${sel ? `${t.btn} text-white shadow-md scale-[1.03]` : `${t.cardBg} hover:opacity-80`}`}>
+                      <p className={`text-3xl font-bold ${sel ? "text-white" : t.cardText}`}>{avail}</p>
+                      <p className={`text-xs mt-1 ${sel ? "text-white/80" : t.cardText + " opacity-75"}`}>{t.label}</p>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Qty stepper + claim (visible when a type is selected) */}
+              {selT && (
+                <div className="flex gap-2 items-center mb-4">
+                  <div className="flex-1 flex items-center bg-slate-100 rounded-xl overflow-hidden">
+                    <button onClick={()=>setSelectedClaimQty(q=>Math.max(1,q-1))} className="px-5 py-3 text-slate-700 text-xl font-bold hover:bg-slate-200 select-none">−</button>
+                    <span className="flex-1 text-center text-lg font-bold text-slate-800 select-none">{safeCqty}</span>
+                    <button onClick={()=>setSelectedClaimQty(q=>Math.min(maxForSelType,q+1))} className="px-5 py-3 text-slate-700 text-xl font-bold hover:bg-slate-200 select-none">+</button>
                   </div>
-                );
-              })}
-            </div>
+                  <button onClick={()=>claimByType(selectedClaimType, safeCqty)} disabled={saving}
+                    className={`${selT.btn} text-white px-5 py-3 rounded-xl font-semibold text-sm disabled:opacity-40 shadow-sm`}>
+                    {saving ? "…" : "Claim"}
+                  </button>
+                </div>
+              )}
+
+              {/* My offers (offset) */}
+              {myOffered > 0 && (
+                <>
+                  <div className="h-px bg-slate-100 mb-3" />
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">My Offers</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {TYPES.map(t => (
+                      <div key={t.key} className={`${t.cardBg} rounded-xl p-3 text-center ${myOffersByType[t.key]===0?"opacity-30":""}`}>
+                        <p className={`text-3xl font-bold ${t.cardText}`}>{myOffersByType[t.key]}</p>
+                        <p className={`text-xs mt-1 ${t.cardText} opacity-75`}>{t.label}</p>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {Object.values(poolByType).every(v=>v===0) && (
+                <p className="text-center text-slate-400 text-sm py-4">
+                  {state.claimLimit > 0 ? "Nothing available right now" : "All shifts have been claimed"}
+                </p>
+              )}
+            </>
           )}
         </section>
 
@@ -509,13 +551,14 @@ export default function App() {
                       <p className="text-xs text-slate-500 font-semibold uppercase tracking-wide">Round 2 claim limit</p>
                       <div className="flex items-center gap-3">
                         <input type="number" min="1" max="99" value={draftLimit}
-                          onChange={e=>setDraftLimit(Math.max(1,Number(e.target.value)||1))}
+                          onChange={e=>setDraftLimit(e.target.value)}
+                          onBlur={()=>setDraftLimit(v => String(Math.max(1, parseInt(v)||1)))}
                           className="w-20 border border-slate-200 bg-white rounded-lg px-3 py-2 text-sm text-center font-bold focus:outline-none focus:ring-2 focus:ring-sky-300" />
                         <span className="text-xs text-slate-500">max shifts per person</span>
                       </div>
-                      <button onClick={()=>push({...state, claimOpen:true, claimLimit:draftLimit, claimedCounts:{}})} disabled={saving}
+                      <button onClick={()=>push({...state, claimOpen:true, claimLimit:Math.max(1,parseInt(draftLimit)||1), claimedCounts:{}})} disabled={saving}
                         className="w-full py-2.5 rounded-xl text-sm font-semibold bg-green-50 text-green-700 hover:bg-green-100">
-                        ✅ Open Claiming — Round 2 (limit: {draftLimit})
+                        ✅ Open Claiming — Round 2 (limit: {Math.max(1,parseInt(draftLimit)||1)})
                       </button>
                     </div>
                   )}
