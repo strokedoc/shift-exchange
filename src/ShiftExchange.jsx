@@ -212,6 +212,21 @@ export default function App() {
   };
 
   const saveAlloc = async () => {
+    // Row (per-physician) and column (per-type) totals should stay static.
+    const rowsOff = allocDraft.filter((p,i)=> state.physicians[i] &&
+      (p.ts+p.tn+p.ip) !== (state.physicians[i].ts+state.physicians[i].tn+state.physicians[i].ip)).length;
+    const colsOff = ["ts","tn","ip"].filter(k =>
+      allocDraft.reduce((s,p)=>s+p[k],0) !== state.physicians.reduce((s,p)=>s+p[k],0));
+    if (rowsOff > 0 || colsOff.length > 0) {
+      const lines = [];
+      if (rowsOff > 0) lines.push(`• ${rowsOff} physician row total(s) changed`);
+      if (colsOff.length > 0) lines.push(`• Column total(s) changed: ${colsOff.map(k=>getType(k).short).join(", ")}`);
+      const ok = confirm(
+        `Totals no longer match the current allocation:\n${lines.join("\n")}\n\n` +
+        `This changes the overall number of shifts. Override and save anyway?`
+      );
+      if (!ok) return;
+    }
     const ok = await push({...state, physicians:allocDraft, pool:[]});
     if (ok) { setPanel(null); toast2("Allocations saved — pool cleared"); }
   };
@@ -609,22 +624,49 @@ export default function App() {
                   ) : (
                     <div className="bg-slate-50 rounded-xl p-3 space-y-2">
                       <p className="text-xs text-slate-500 font-semibold uppercase tracking-wide">Counts — pool clears on save</p>
-                      <div className="grid grid-cols-4 gap-1 text-xs text-slate-400 font-semibold">
-                        <span>Name</span><span className="text-center">TS</span><span className="text-center">TN</span><span className="text-center">CB</span>
+                      <p className="text-[11px] text-slate-400 leading-snug">Row (Σ) and column totals should stay the same. Anything that drifts turns red — you can still save to override.</p>
+                      <div className="grid grid-cols-[1fr_2rem_2rem_2rem_2rem] gap-1 text-xs text-slate-400 font-semibold">
+                        <span>Name</span><span className="text-center">TS</span><span className="text-center">TN</span><span className="text-center">CB</span><span className="text-center">Σ</span>
                       </div>
-                      {allocDraft.map((p,i) => (
-                        <div key={p.id} className="grid grid-cols-4 gap-1 items-center">
-                          <span className="text-xs text-slate-600 truncate">{p.name}</span>
-                          {["ts","tn","ip"].map(k => (
-                            <input key={k} type="number" min="0" max="99" value={allocDraft[i][k]}
-                              onChange={e=>setAllocDraft(d=>{const a=[...d];a[i]={...a[i],[k]:Number(e.target.value)||0};return a;})}
-                              className="border border-slate-200 bg-white rounded-lg px-1 py-1.5 text-xs text-center focus:outline-none focus:ring-2 focus:ring-sky-300" />
-                          ))}
-                        </div>
-                      ))}
-                      <p className="text-xs text-slate-400 text-right pt-1">
-                        TS:{allocDraft.reduce((s,p)=>s+p.ts,0)} · TN:{allocDraft.reduce((s,p)=>s+p.tn,0)} · CB:{allocDraft.reduce((s,p)=>s+p.ip,0)}
-                      </p>
+                      {allocDraft.map((p,i) => {
+                        const rowTot  = p.ts+p.tn+p.ip;
+                        const baseTot = state.physicians[i] ? state.physicians[i].ts+state.physicians[i].tn+state.physicians[i].ip : rowTot;
+                        const off = rowTot !== baseTot;
+                        return (
+                          <div key={p.id} className="grid grid-cols-[1fr_2rem_2rem_2rem_2rem] gap-1 items-center">
+                            <span className="text-xs text-slate-600 truncate">{p.name}</span>
+                            {["ts","tn","ip"].map(k => (
+                              <input key={k} type="number" min="0" max="99" value={allocDraft[i][k]}
+                                onChange={e=>setAllocDraft(d=>{const a=[...d];a[i]={...a[i],[k]:Number(e.target.value)||0};return a;})}
+                                className="border border-slate-200 bg-white rounded-lg px-1 py-1.5 text-xs text-center focus:outline-none focus:ring-2 focus:ring-sky-300" />
+                            ))}
+                            <span title={off?`Was ${baseTot}`:""} className={`text-center text-xs font-bold ${off?"text-red-500":"text-slate-400"}`}>{rowTot}</span>
+                          </div>
+                        );
+                      })}
+                      <div className="grid grid-cols-[1fr_2rem_2rem_2rem_2rem] gap-1 items-center pt-1.5 border-t border-slate-200">
+                        <span className="text-xs text-slate-400 font-semibold">Totals</span>
+                        {["ts","tn","ip"].map(k => {
+                          const cur  = allocDraft.reduce((s,p)=>s+p[k],0);
+                          const base = state.physicians.reduce((s,p)=>s+p[k],0);
+                          const off  = cur !== base;
+                          return <span key={k} title={off?`Was ${base}`:""} className={`text-center text-xs font-bold ${off?"text-red-500":"text-slate-500"}`}>{cur}</span>;
+                        })}
+                        <span className="text-center text-xs font-bold text-slate-500">{allocDraft.reduce((s,p)=>s+p.ts+p.tn+p.ip,0)}</span>
+                      </div>
+                      {(() => {
+                        const rowsOff = allocDraft.filter((p,i)=> state.physicians[i] && (p.ts+p.tn+p.ip)!==(state.physicians[i].ts+state.physicians[i].tn+state.physicians[i].ip)).length;
+                        const colsOff = ["ts","tn","ip"].filter(k => allocDraft.reduce((s,p)=>s+p[k],0)!==state.physicians.reduce((s,p)=>s+p[k],0));
+                        if (!rowsOff && !colsOff.length) return null;
+                        return (
+                          <div className="bg-red-50 border border-red-200 rounded-lg p-2 text-[11px] text-red-600 leading-snug">
+                            ⚠️ Totals differ from the current allocation
+                            {rowsOff>0 && <> · {rowsOff} row{rowsOff>1?"s":""}</>}
+                            {colsOff.length>0 && <> · column{colsOff.length>1?"s":""} {colsOff.map(k=>getType(k).short).join(", ")}</>}
+                            . Saving will override.
+                          </div>
+                        );
+                      })()}
                       <div className="flex gap-2">
                         <button onClick={saveAlloc} disabled={saving} className="flex-1 py-2.5 bg-sky-600 text-white rounded-xl text-sm font-semibold disabled:opacity-40">Save</button>
                         <button onClick={()=>setPanel(null)} className="flex-1 py-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl text-sm font-semibold">Cancel</button>
