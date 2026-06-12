@@ -131,32 +131,71 @@ export default function App() {
   const claimByType = async (grabType, offerType, qty) => {
     const myOfferedTotal = state.offeredCounts?.[me.id] ?? 0;
     const myClaimed = state.claimedCounts?.[me.id] ?? 0;
-    const offerBudget = myOfferedTotal - myClaimed;
-    if (qty > offerBudget)
+    if (qty > myOfferedTotal - myClaimed)
       return toast2("You can only claim as many shifts as you've offered","err");
     if (state.claimLimit > 0 && myClaimed + qty > state.claimLimit)
       return toast2(`Limit reached — max ${state.claimLimit} shifts in Round 2`,"err");
-    // Consume grabType pool items FIFO (oldest first), skipping own offers
-    const available = (state.pool??[])
+
+    const grabItems = (state.pool??[])
       .filter(p => p.type === grabType && p.fromId !== me.id)
       .sort((a, b) => a.at - b.at);
-    let remaining = qty;
+    const myOfferItems = (state.pool??[])
+      .filter(p => p.type === offerType && p.fromId === me.id)
+      .sort((a, b) => a.at - b.at);
+
+    const grabAvail  = grabItems.reduce((s, p) => s + p.qty, 0);
+    const offerAvail = myOfferItems.reduce((s, p) => s + p.qty, 0);
+    if (grabAvail  < qty) return toast2(`Only ${grabAvail} ${getType(grabType).label} available`,"err");
+    if (offerAvail < qty) return toast2(`Only ${offerAvail} ${getType(offerType).label} in your active offers`,"err");
+
     let newPool = [...(state.pool??[])];
-    for (const item of available) {
-      if (remaining <= 0) break;
-      if (item.qty <= remaining) {
-        newPool = newPool.filter(p => p.id !== item.id);
-      } else {
-        newPool = newPool.map(p => p.id === item.id ? {...p, qty: p.qty - remaining} : p);
-      }
-      remaining -= Math.min(item.qty, remaining);
+
+    // Consume grab items FIFO; record who contributed so we can credit them with offerType
+    const takenFrom = {};
+    let rem = qty;
+    for (const item of grabItems) {
+      if (rem <= 0) break;
+      const c = Math.min(item.qty, rem);
+      takenFrom[item.fromId] = (takenFrom[item.fromId] ?? 0) + c;
+      newPool = item.qty <= rem
+        ? newPool.filter(p => p.id !== item.id)
+        : newPool.map(p => p.id === item.id ? {...p, qty: p.qty - rem} : p);
+      rem -= c;
     }
-    if (remaining > 0) return toast2(`Only ${qty - remaining} ${getType(grabType).label} available`,"err");
+
+    // Consume my offer items FIFO (they leave the pool — fulfilled)
+    rem = qty;
+    for (const item of myOfferItems) {
+      if (rem <= 0) break;
+      const c = Math.min(item.qty, rem);
+      newPool = item.qty <= rem
+        ? newPool.filter(p => p.id !== item.id)
+        : newPool.map(p => p.id === item.id ? {...p, qty: p.qty - rem} : p);
+      rem -= c;
+    }
+
+    // Shift changes:
+    // - I receive qty of grabType
+    // - Each doctor whose grab offer was consumed receives their share of offerType (auto-credit)
+    const physicians = state.physicians.map(p => {
+      if (p.id === me.id) return {...p, [grabType]: p[grabType] + qty};
+      const credit = takenFrom[p.id];
+      if (credit) return {...p, [offerType]: p[offerType] + credit};
+      return p;
+    });
+
+    // Decrement offeredCounts for doctors whose grab offers are now fulfilled
+    const newOfferedCounts = { ...(state.offeredCounts ?? {}) };
+    for (const [fromId, taken] of Object.entries(takenFrom)) {
+      newOfferedCounts[Number(fromId)] = Math.max(0, (newOfferedCounts[Number(fromId)] ?? 0) - taken);
+    }
+
     const ok = await push({
       ...state,
-      physicians: state.physicians.map(p => p.id===me.id ? {...p,[grabType]:p[grabType]+qty} : p),
+      physicians,
       pool: newPool,
       claimedCounts: { ...(state.claimedCounts??{}), [me.id]: myClaimed + qty },
+      offeredCounts: newOfferedCounts,
     });
     if (ok) {
       setSelectedGrabType(null);
@@ -446,7 +485,7 @@ export default function App() {
                           onClick={()=>{ setSelectedOfferType(sel ? null : t.key); setSelectedClaimQty(1); }}
                           disabled={!canOffer}
                           className={`rounded-xl p-3 text-center transition-all disabled:opacity-35 ${sel ? `${t.btn} text-white shadow-md scale-[1.03]` : `${t.cardBg} hover:opacity-80`}`}>
-                          <p className={`text-3xl font-bold ${sel ? "text-white" : t.cardText}`}>{wants}</p>
+                          <p className={`text-3xl font-bold ${sel ? "text-white" : t.cardText}`}>{myHave}</p>
                           <p className={`text-xs mt-1 ${sel ? "text-white/80" : t.cardText + " opacity-75"}`}>{t.label}</p>
                         </button>
                       );
