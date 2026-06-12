@@ -33,8 +33,21 @@ function fresh(names = NAMES) {
     claimOpen: false,
     claimLimit: 2,
     claimedCounts: {},
-    offeredCounts: {},
     adminPin: DEFAULT_PIN,
+  };
+}
+
+// Normalize a pool entry to the give/want shape (migrates old {type,qty} entries)
+function normEntry(p) {
+  return {
+    id: p.id,
+    fromId: p.fromId,
+    fromName: p.fromName,
+    giveType: p.giveType ?? p.type,
+    wantType: p.wantType ?? p.type,
+    giveQty: p.giveQty ?? p.qty ?? 0,
+    wantQty: p.wantQty ?? p.qty ?? 0,
+    at: p.at,
   };
 }
 
@@ -70,8 +83,9 @@ export default function App() {
       const snapshot = await get(ref(db, "appstate"));
       if (!snapshot.exists()) return null;
       const d = snapshot.val();
-      // Firebase drops empty arrays; normalize pool back to array
-      return { ...d, pool: d.pool ? Object.values(d.pool) : [], claimOpen: d.claimOpen ?? false, claimLimit: d.claimLimit ?? 2, claimedCounts: d.claimedCounts ?? {}, offeredCounts: d.offeredCounts ?? {} };
+      // Firebase drops empty arrays; normalize pool back to array of give/want entries
+      const pool = (d.pool ? Object.values(d.pool) : []).map(normEntry);
+      return { ...d, pool, claimOpen: d.claimOpen ?? false, claimLimit: d.claimLimit ?? 2, claimedCounts: d.claimedCounts ?? {} };
     } catch { return null; }
   };
 
@@ -102,106 +116,114 @@ export default function App() {
   // ── Derived ──────────────────────────────────────────────
   const me  = state?.physicians.find(p => p.id === userId);
   const mine = (state?.pool??[]).filter(p => p.fromId === userId);
-  const pool = (state?.pool??[]).filter(p => p.fromId !== userId);
 
   // ── Shift actions ────────────────────────────────────────
   const offer = async () => {
     const qty = Number(ofQty);
     if (!me || qty < 1) return;
-    if (me[ofType] < qty) return toast2(`Only ${me[ofType]} ${getType(ofType).label} left`,"err");
+    // No shifts move yet — just register the offer. Cap by what you actually
+    // hold minus what you've already put up to give of this type.
+    const pendingGive = (state.pool??[]).filter(p => p.fromId===me.id && p.giveType===ofType).reduce((s,p)=>s+(p.giveQty??0),0);
+    const avail = me[ofType] - pendingGive;
+    if (avail < qty) return toast2(`Only ${Math.max(0,avail)} ${getType(ofType).label} left to offer`,"err");
     const ok = await push({
       ...state,
-      physicians: state.physicians.map(p => p.id===me.id ? {...p,[ofType]:p[ofType]-qty} : p),
-      pool: [...(state.pool??[]), {id:`${Date.now()}-${Math.random().toString(36).slice(2)}`, fromId:me.id, fromName:me.name, type:ofType, wantType, qty, at:Date.now()}],
-      offeredCounts: { ...(state.offeredCounts??{}), [me.id]: (state.offeredCounts?.[me.id]??0) + qty },
+      pool: [...(state.pool??[]), {
+        id:`${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        fromId:me.id, fromName:me.name,
+        giveType:ofType, wantType,
+        giveQty:qty, wantQty:qty, at:Date.now(),
+      }],
     });
     if (ok) { toast2(`Offered ${qty}× ${getType(ofType).label}`); setOfQty(1); }
   };
 
   const retract = async item => {
+    // Nothing was pre-deducted; retract just cancels the remaining offer.
     const ok = await push({
       ...state,
-      physicians: state.physicians.map(p => p.id===me.id ? {...p,[item.type]:p[item.type]+item.qty} : p),
       pool: (state.pool??[]).filter(p => p.id!==item.id),
-      offeredCounts: { ...(state.offeredCounts??{}), [me.id]: Math.max(0,(state.offeredCounts?.[me.id]??0) - item.qty) },
     });
     if (ok) toast2("Offer retracted");
   };
 
   const claimByType = async (grabType, offerType, qty) => {
-    const myOfferedTotal = state.offeredCounts?.[me.id] ?? 0;
     const myClaimed = state.claimedCounts?.[me.id] ?? 0;
-    if (qty > myOfferedTotal - myClaimed)
-      return toast2("You can only claim as many shifts as you've offered","err");
+    if (qty < 1) return;
+    if (grabType === offerType) return toast2("Grab and give must be different types","err");
     if (state.claimLimit > 0 && myClaimed + qty > state.claimLimit)
       return toast2(`Limit reached — max ${state.claimLimit} shifts in Round 2`,"err");
+    if (me[offerType] < qty)
+      return toast2(`You only have ${me[offerType]} ${getType(offerType).label} to give`,"err");
 
-    const grabItems = (state.pool??[])
-      .filter(p => p.type === grabType && p.fromId !== me.id)
+    const poolArr = state.pool ?? [];
+    // GRAB side: shifts of grabType others have put up (FIFO)
+    const grabEntries = poolArr
+      .filter(p => p.giveType === grabType && p.fromId !== me.id && (p.giveQty??0) > 0)
       .sort((a, b) => a.at - b.at);
-    const myOfferItems = (state.pool??[])
-      .filter(p => p.type === offerType && p.fromId === me.id)
+    // OFFER side: requests for offerType others have put up (FIFO)
+    const wantEntries = poolArr
+      .filter(p => p.wantType === offerType && p.fromId !== me.id && (p.wantQty??0) > 0)
       .sort((a, b) => a.at - b.at);
 
-    const grabAvail  = grabItems.reduce((s, p) => s + p.qty, 0);
-    const offerAvail = myOfferItems.reduce((s, p) => s + p.qty, 0);
-    if (grabAvail  < qty) return toast2(`Only ${grabAvail} ${getType(grabType).label} available`,"err");
-    if (offerAvail < qty) return toast2(`Only ${offerAvail} ${getType(offerType).label} in your active offers`,"err");
+    const grabAvail = grabEntries.reduce((s, p) => s + p.giveQty, 0);
+    const wantAvail = wantEntries.reduce((s, p) => s + p.wantQty, 0);
+    if (grabAvail < qty) return toast2(`Only ${grabAvail} ${getType(grabType).label} available to grab`,"err");
+    if (wantAvail < qty) return toast2(`Only ${wantAvail} ${getType(offerType).label} wanted right now`,"err");
 
-    let newPool = [...(state.pool??[])];
+    // Decide consumption FIFO on each side independently
+    const giveDec = {};    // entryId -> giveQty to remove
+    const wantDec = {};    // entryId -> wantQty to remove
+    const ownerLoses = {}; // physId -> grabType shifts they give up
+    const ownerGains = {}; // physId -> offerType shifts they receive
 
-    // Consume grab items FIFO; record who contributed so we can credit them with offerType
-    const takenFrom = {};
     let rem = qty;
-    for (const item of grabItems) {
+    for (const e of grabEntries) {
       if (rem <= 0) break;
-      const c = Math.min(item.qty, rem);
-      takenFrom[item.fromId] = (takenFrom[item.fromId] ?? 0) + c;
-      newPool = item.qty <= rem
-        ? newPool.filter(p => p.id !== item.id)
-        : newPool.map(p => p.id === item.id ? {...p, qty: p.qty - rem} : p);
+      const c = Math.min(e.giveQty, rem);
+      giveDec[e.id] = c;
+      ownerLoses[e.fromId] = (ownerLoses[e.fromId] ?? 0) + c;
       rem -= c;
     }
-
-    // Consume my offer items FIFO (they leave the pool — fulfilled)
     rem = qty;
-    for (const item of myOfferItems) {
+    for (const e of wantEntries) {
       if (rem <= 0) break;
-      const c = Math.min(item.qty, rem);
-      newPool = item.qty <= rem
-        ? newPool.filter(p => p.id !== item.id)
-        : newPool.map(p => p.id === item.id ? {...p, qty: p.qty - rem} : p);
+      const c = Math.min(e.wantQty, rem);
+      wantDec[e.id] = c;
+      ownerGains[e.fromId] = (ownerGains[e.fromId] ?? 0) + c;
       rem -= c;
     }
 
-    // Shift changes:
-    // - I receive qty of grabType
-    // - Each doctor whose grab offer was consumed receives their share of offerType (auto-credit)
-    const physicians = state.physicians.map(p => {
-      if (p.id === me.id) return {...p, [grabType]: p[grabType] + qty};
-      const credit = takenFrom[p.id];
-      if (credit) return {...p, [offerType]: p[offerType] + credit};
-      return p;
-    });
+    // Apply pool decrements; drop entries that are fully resolved on BOTH sides
+    const newPool = poolArr
+      .map(p => {
+        const gq = (p.giveQty ?? 0) - (giveDec[p.id] ?? 0);
+        const wq = (p.wantQty ?? 0) - (wantDec[p.id] ?? 0);
+        return { ...p, giveQty: gq, wantQty: wq };
+      })
+      .filter(p => (p.giveQty ?? 0) > 0 || (p.wantQty ?? 0) > 0);
 
-    // Decrement offeredCounts for doctors whose grab offers are now fulfilled
-    const newOfferedCounts = { ...(state.offeredCounts ?? {}) };
-    for (const [fromId, taken] of Object.entries(takenFrom)) {
-      newOfferedCounts[Number(fromId)] = Math.max(0, (newOfferedCounts[Number(fromId)] ?? 0) - taken);
-    }
+    // Shift moves: I gain grabType / lose offerType; offerers lose grabType;
+    // requesters gain offerType. Every move is paired → total per type conserved.
+    const physicians = state.physicians.map(p => {
+      let np = p;
+      if (p.id === me.id) np = { ...np, [grabType]: np[grabType] + qty, [offerType]: np[offerType] - qty };
+      if (ownerLoses[p.id]) np = { ...np, [grabType]: np[grabType] - ownerLoses[p.id] };
+      if (ownerGains[p.id]) np = { ...np, [offerType]: np[offerType] + ownerGains[p.id] };
+      return np;
+    });
 
     const ok = await push({
       ...state,
       physicians,
       pool: newPool,
       claimedCounts: { ...(state.claimedCounts??{}), [me.id]: myClaimed + qty },
-      offeredCounts: newOfferedCounts,
     });
     if (ok) {
       setSelectedGrabType(null);
       setSelectedOfferType(null);
       setSelectedClaimQty(1);
-      toast2(`Claimed ${qty}× ${getType(grabType).label}`);
+      toast2(`+${qty} ${getType(grabType).label} / −${qty} ${getType(offerType).label}`);
     }
   };
 
@@ -280,33 +302,33 @@ export default function App() {
 
   const ofT = getType(ofType);
 
-  // Even-exchange tracking
-  const myOffered   = state.offeredCounts?.[me.id] ?? 0;
-  const myClaimed   = state.claimedCounts?.[me.id] ?? 0;
-  const offerBudget = myOffered - myClaimed; // how many more I'm allowed to claim
-  const adminRem    = state.claimOpen && state.claimLimit > 0
-                        ? state.claimLimit - myClaimed : Infinity;
+  const myClaimed = state.claimedCounts?.[me.id] ?? 0;
+  const adminRem  = state.claimOpen && state.claimLimit > 0
+                      ? state.claimLimit - myClaimed : Infinity;
 
-  // Pool totals by type (excluding own offers)
-  const poolByType = Object.fromEntries(TYPES.map(t => [
-    t.key, (state.pool??[]).filter(p => p.type===t.key && p.fromId!==me.id).reduce((s,p)=>s+p.qty,0)
+  // GRAB pool: shifts of each type others have put up to give (FIFO source)
+  const grabPoolByType = Object.fromEntries(TYPES.map(t => [
+    t.key, (state.pool??[]).filter(p => p.giveType===t.key && p.fromId!==me.id).reduce((s,p)=>s+(p.giveQty??0),0)
   ]));
-  // My outstanding offers by type
-  const myOffersByType = Object.fromEntries(TYPES.map(t => [
-    t.key, (state.pool??[]).filter(p => p.type===t.key && p.fromId===me.id).reduce((s,p)=>s+p.qty,0)
-  ]));
-  // Wants pool: how much each type is being sought by others' pool items
+  // WANTS pool: how much of each type others are requesting (FIFO destination)
   const wantsPoolByType = Object.fromEntries(TYPES.map(t => [
-    t.key, (state.pool??[]).filter(p => p.wantType===t.key && p.fromId!==me.id).reduce((s,p)=>s+p.qty,0)
+    t.key, (state.pool??[]).filter(p => p.wantType===t.key && p.fromId!==me.id).reduce((s,p)=>s+(p.wantQty??0),0)
+  ]));
+  // What I've put up to give, by type (for the My Offers reference row)
+  const pendingGiveByType = Object.fromEntries(TYPES.map(t => [
+    t.key, (state.pool??[]).filter(p => p.fromId===me.id && p.giveType===t.key).reduce((s,p)=>s+(p.giveQty??0),0)
+  ]));
+  // How many of each type I could give in return: limited by what I hold AND demand
+  const offerCapByType = Object.fromEntries(TYPES.map(t => [
+    t.key, Math.min(me[t.key], wantsPoolByType[t.key])
   ]));
 
   const grabT  = selectedGrabType  ? getType(selectedGrabType)  : null;
   const offerT = selectedOfferType ? getType(selectedOfferType) : null;
   const maxClaim = (selectedGrabType && selectedOfferType)
     ? Math.min(
-        poolByType[selectedGrabType],
-        myOffersByType[selectedOfferType],
-        offerBudget,
+        grabPoolByType[selectedGrabType],
+        offerCapByType[selectedOfferType],
         adminRem === Infinity ? 999 : adminRem
       )
     : 0;
@@ -386,9 +408,9 @@ export default function App() {
               <div className="flex-1 flex items-center bg-slate-100 rounded-xl overflow-hidden">
                 <button onClick={()=>setOfQty(q=>Math.max(1,q-1))} className="px-5 py-3 text-slate-700 text-xl font-bold hover:bg-slate-200 select-none">−</button>
                 <span className="flex-1 text-center text-lg font-bold text-slate-800 select-none">{ofQty}</span>
-                <button onClick={()=>setOfQty(q=>Math.min(me[ofType],q+1))} className="px-5 py-3 text-slate-700 text-xl font-bold hover:bg-slate-200 select-none">+</button>
+                <button onClick={()=>setOfQty(q=>Math.min(Math.max(1,me[ofType]-pendingGiveByType[ofType]),q+1))} className="px-5 py-3 text-slate-700 text-xl font-bold hover:bg-slate-200 select-none">+</button>
               </div>
-              <button onClick={offer} disabled={saving||me[ofType]===0}
+              <button onClick={offer} disabled={saving || me[ofType]-pendingGiveByType[ofType] <= 0}
                 className={`${ofT.btn} text-white px-5 py-3 rounded-xl font-semibold text-sm disabled:opacity-40 shadow-sm`}>
                 {saving?"…":"Offer"}
               </button>
@@ -396,6 +418,7 @@ export default function App() {
             <p className="text-xs text-center text-slate-400 mt-2">
               Offering <span className={`font-semibold ${ofT.cardText}`}>{ofQty}× {ofT.label}</span>
               {" · "}wants <span className={`font-semibold ${getType(wantType).cardText}`}>{ofQty}× {getType(wantType).label}</span>
+              {" · "}<span className="text-slate-400">{Math.max(0,me[ofType]-pendingGiveByType[ofType])} available to give</span>
             </p>
           </section>
         )}
@@ -406,14 +429,17 @@ export default function App() {
             <h2 className="text-sm font-semibold text-slate-700 mb-3">My Active Offers</h2>
             <div className="space-y-2">
               {mine.map(item => {
-                const t = getType(item.type);
+                const g = getType(item.giveType);
+                const w = getType(item.wantType);
                 return (
                   <div key={item.id} className="flex items-center justify-between py-1">
                     <div className="flex items-center gap-1.5">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${t.badge}`}>{t.short}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${g.badge}`}>{g.short}</span>
                       <span className="text-xs text-slate-300">→</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getType(item.wantType??item.type).badge}`}>{getType(item.wantType??item.type).short}</span>
-                      <span className="text-sm font-medium text-slate-700">{item.qty} shift{item.qty>1?"s":""}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${w.badge}`}>{w.short}</span>
+                      <span className="text-sm font-medium text-slate-700">
+                        give {item.giveQty} · want {item.wantQty}
+                      </span>
                     </div>
                     <button onClick={()=>retract(item)} disabled={saving}
                       className="text-xs text-red-400 hover:text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-50 disabled:opacity-40">
@@ -431,10 +457,13 @@ export default function App() {
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-sm font-semibold text-slate-700">Available to Claim</h2>
-              {state.claimOpen && (
-                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${offerBudget > 0 ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-400"}`}>
-                  {offerBudget > 0 ? `${offerBudget} remaining` : myOffered === 0 ? "offer shifts to unlock" : "balanced"}
+              {state.claimOpen && state.claimLimit > 0 && (
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${adminRem > 0 ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-400"}`}>
+                  {Math.max(0,adminRem)} of {state.claimLimit} left
                 </span>
+              )}
+              {state.claimOpen && state.claimLimit === 0 && (
+                <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-violet-50 text-violet-700">unrestricted</span>
               )}
             </div>
             <button onClick={async()=>{setSyncing(true);const d=await pull();if(d)setState(d);setSyncing(false);toast2("Synced ✓");}}
@@ -451,13 +480,13 @@ export default function App() {
             </p>
           ) : (
             <>
-              {/* Row 1: Grab — pool totals by type */}
+              {/* Row 1: Grab — what others have put up to give, by type */}
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Grab</p>
               <div className="grid grid-cols-3 gap-2 mb-4">
                 {TYPES.map(t => {
-                  const avail = poolByType[t.key];
+                  const avail = grabPoolByType[t.key];
                   const sel = selectedGrabType === t.key;
-                  const canPick = avail > 0 && offerBudget > 0;
+                  const canPick = avail > 0 && adminRem > 0;
                   return (
                     <button key={t.key}
                       onClick={()=>{ setSelectedGrabType(sel ? null : t.key); setSelectedOfferType(null); setSelectedClaimQty(1); }}
@@ -470,22 +499,21 @@ export default function App() {
                 })}
               </div>
 
-              {/* Row 2: Available to Offer — wants pool by type (appears after grab selection) */}
+              {/* Row 2: Give in return — types others want that you can supply */}
               {selectedGrabType && (
                 <>
-                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Available to Offer</p>
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Give in return <span className="normal-case text-slate-300">(what others want)</span></p>
                   <div className="grid grid-cols-3 gap-2 mb-4">
                     {TYPES.map(t => {
-                      const wants = wantsPoolByType[t.key];
-                      const myHave = myOffersByType[t.key];
+                      const cap = offerCapByType[t.key];          // min(your holdings, demand)
                       const sel = selectedOfferType === t.key;
-                      const canOffer = wants > 0 && myHave > 0;
+                      const canOffer = cap > 0 && t.key !== selectedGrabType;
                       return (
                         <button key={t.key}
                           onClick={()=>{ setSelectedOfferType(sel ? null : t.key); setSelectedClaimQty(1); }}
                           disabled={!canOffer}
                           className={`rounded-xl p-3 text-center transition-all disabled:opacity-35 ${sel ? `${t.btn} text-white shadow-md scale-[1.03]` : `${t.cardBg} hover:opacity-80`}`}>
-                          <p className={`text-3xl font-bold ${sel ? "text-white" : t.cardText}`}>{myHave}</p>
+                          <p className={`text-3xl font-bold ${sel ? "text-white" : t.cardText}`}>{cap}</p>
                           <p className={`text-xs mt-1 ${sel ? "text-white/80" : t.cardText + " opacity-75"}`}>{t.label}</p>
                         </button>
                       );
@@ -510,15 +538,15 @@ export default function App() {
                 </div>
               )}
 
-              {/* Row 3: My Offers — reference display */}
-              {myOffered > 0 && (
+              {/* Row 3: My pending gives — reference display */}
+              {Object.values(pendingGiveByType).some(v=>v>0) && (
                 <>
                   <div className="h-px bg-slate-100 mb-3" />
-                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">My Offers</p>
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">My Pending Gives</p>
                   <div className="grid grid-cols-3 gap-2">
                     {TYPES.map(t => (
-                      <div key={t.key} className={`${t.cardBg} rounded-xl p-3 text-center ${myOffersByType[t.key]===0?"opacity-30":""}`}>
-                        <p className={`text-3xl font-bold ${t.cardText}`}>{myOffersByType[t.key]}</p>
+                      <div key={t.key} className={`${t.cardBg} rounded-xl p-3 text-center ${pendingGiveByType[t.key]===0?"opacity-30":""}`}>
+                        <p className={`text-3xl font-bold ${t.cardText}`}>{pendingGiveByType[t.key]}</p>
                         <p className={`text-xs mt-1 ${t.cardText} opacity-75`}>{t.label}</p>
                       </div>
                     ))}
@@ -526,7 +554,7 @@ export default function App() {
                 </>
               )}
 
-              {Object.values(poolByType).every(v=>v===0) && (
+              {Object.values(grabPoolByType).every(v=>v===0) && (
                 <p className="text-center text-slate-400 text-sm py-4">
                   {state.claimLimit > 0 ? "Nothing available right now" : "All shifts have been claimed"}
                 </p>
@@ -618,7 +646,7 @@ export default function App() {
 
                   {/* Round controls */}
                   {!state.exchangeOpen && (
-                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
+                    <button onClick={()=>push({...state, exchangeOpen:true, claimOpen:false, claimedCounts:{}})} disabled={saving}
                       className="w-full py-3 rounded-xl text-sm font-semibold bg-amber-50 text-amber-700 hover:bg-amber-100">
                       🔓 Open Exchange — Round 1 (Offers Only)
                     </button>
@@ -645,31 +673,16 @@ export default function App() {
                       🔄 Open Round 3 — Unrestricted Cleanup
                     </button>
                   )}
-                  {state.exchangeOpen && (state.pool??[]).length === 0 && (
-                    <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
-                      className="w-full py-3 rounded-xl text-sm font-semibold bg-red-50 text-red-600 hover:bg-red-100">
-                      🔒 Close Exchange
-                    </button>
-                  )}
-                  {state.exchangeOpen && (state.pool??[]).length > 0 && (
+                  {state.exchangeOpen && (
                     <div className="space-y-2">
-                      <p className="text-xs text-amber-600 font-medium text-center">
-                        ⚠️ {(state.pool??[]).reduce((s,p)=>s+p.qty,0)} shifts still in the pool
-                      </p>
-                      <button onClick={()=>{
-                        const poolItems = state.pool ?? [];
-                        let physicians = [...state.physicians];
-                        for (const item of poolItems) {
-                          physicians = physicians.map(p => p.id===item.fromId ? {...p,[item.type]:p[item.type]+item.qty} : p);
-                        }
-                        push({...state, physicians, pool:[], exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}});
-                      }} disabled={saving}
+                      {(state.pool??[]).length > 0 && (
+                        <p className="text-xs text-slate-400 text-center">
+                          {(state.pool??[]).reduce((s,p)=>s+(p.giveQty??0),0)} unfilled gives · {(state.pool??[]).reduce((s,p)=>s+(p.wantQty??0),0)} unfilled wants will be cancelled (no shifts move)
+                        </p>
+                      )}
+                      <button onClick={()=>push({...state, pool:[], exchangeOpen:false, claimOpen:false, claimedCounts:{}})} disabled={saving}
                         className="w-full py-3 rounded-xl text-sm font-semibold bg-red-50 text-red-600 hover:bg-red-100">
-                        🔒 Close + Return All Pending Offers
-                      </button>
-                      <button onClick={()=>push({...state, exchangeOpen:false, claimOpen:false, claimedCounts:{}, offeredCounts:{}})} disabled={saving}
-                        className="w-full py-3 rounded-xl text-sm font-semibold bg-slate-50 text-slate-500 hover:bg-slate-100">
-                        🔒 Close (leave pool as-is)
+                        🔒 Close Exchange &amp; Clear Pool
                       </button>
                     </div>
                   )}
