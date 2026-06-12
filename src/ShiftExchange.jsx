@@ -48,35 +48,54 @@ function normEntry(p) {
   };
 }
 
-// Greedily settle complementary offers (A gives X wants Y  ⇄  B gives Y wants X),
-// oldest-first, partial allowed. Each match moves shifts between the two parties
-// and decrements both orders, so nobody can exceed what they declared.
+// Greedily settle offers, oldest-first, partial allowed. Each match moves shifts
+// only between the parties involved and decrements their orders, so nobody can
+// exceed what they declared. Direct 2-way swaps are settled first; any leftover
+// is then checked for 3-way cycles (A→B→C→A). With 3 shift types there are only
+// two possible cycles, so this stays bounded and deterministic.
 function resolveMatches(state) {
   const physicians = state.physicians.map(p => ({ ...p }));
   const byId = Object.fromEntries(physicians.map(p => [p.id, p]));
   let pool = (state.pool ?? []).map(e => ({ ...e }));
 
-  let guard = 0;
-  let again = true;
+  const move = (offer, m) => { byId[offer.fromId][offer.giveType] -= m; byId[offer.fromId][offer.wantType] += m; offer.qty -= m; };
+
+  let guard = 0, again = true;
   while (again && guard < 100000) {
     again = false;
     guard++;
     pool.sort((a, b) => a.at - b.at);
+
+    // 1) Direct pairwise swaps (preferred — only two people involved)
     for (let i = 0; i < pool.length && !again; i++) {
       const A = pool[i];
       if (A.qty <= 0) continue;
       for (let j = 0; j < pool.length; j++) {
         const B = pool[j];
-        if (i === j || B.qty <= 0) continue;
-        if (A.fromId === B.fromId) continue;
+        if (i === j || B.qty <= 0 || A.fromId === B.fromId) continue;
         if (A.giveType === B.wantType && A.wantType === B.giveType) {
           const m = Math.min(A.qty, B.qty);
-          byId[A.fromId][A.giveType] -= m;
-          byId[A.fromId][A.wantType] += m;
-          byId[B.fromId][B.giveType] -= m;
-          byId[B.fromId][B.wantType] += m;
-          A.qty -= m;
-          B.qty -= m;
+          move(A, m); move(B, m);
+          again = true;
+          break;
+        }
+      }
+    }
+    if (again) continue;
+
+    // 2) Three-way cycle: A gives x wants y, B gives y wants z, C gives z wants x
+    for (let i = 0; i < pool.length && !again; i++) {
+      const A = pool[i];
+      if (A.qty <= 0) continue;
+      for (let j = 0; j < pool.length && !again; j++) {
+        const B = pool[j];
+        if (B.qty <= 0 || B.fromId === A.fromId || B.giveType !== A.wantType) continue;
+        for (let k = 0; k < pool.length; k++) {
+          const C = pool[k];
+          if (C.qty <= 0 || C.fromId === A.fromId || C.fromId === B.fromId) continue;
+          if (C.giveType !== B.wantType || C.wantType !== A.giveType) continue;
+          const m = Math.min(A.qty, B.qty, C.qty);
+          move(A, m); move(B, m); move(C, m);
           again = true;
           break;
         }
@@ -318,7 +337,7 @@ export default function App() {
             <h2 className="text-sm font-semibold text-slate-700 mb-1">Offer a Swap</h2>
             <p className="text-xs text-slate-400 mb-3">
               {state.claimOpen
-                ? "Matching is live — your offer settles the instant someone offers the reverse."
+                ? "Matching is live — your offer settles (fully or partly) the moment a two- or three-way match exists."
                 : "Offers are collected now; they settle when admin opens Round 2."}
             </p>
             <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5">Giving up</p>
@@ -434,7 +453,7 @@ export default function App() {
               </div>
               {state.claimOpen && (
                 <p className="text-xs text-slate-400 text-center mt-3">
-                  Complementary offers (give X / want Y ⇄ give Y / want X) settle automatically.
+                  Two-way and three-way swaps settle automatically — fully or partially — the moment a match exists.
                 </p>
               )}
             </>
