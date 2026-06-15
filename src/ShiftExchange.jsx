@@ -25,9 +25,24 @@ const NAMES = [
   "Briana Wasserstrom",
 ];
 
+const DEFAULTS = {
+  "Stephanie McNeill":  { ts:5, tn:12, ip:9 },
+  "Christian Sonnefeld":{ ts:4, tn:13, ip:9 },
+  "Mary Hollist":       { ts:4, tn:13, ip:9 },
+  "Eric Marin":         { ts:4, tn:14, ip:8 },
+  "Harsh Patel":        { ts:5, tn:12, ip:9 },
+  "Jay Madey":          { ts:4, tn:14, ip:8 },
+  "Crystal Yu":         { ts:5, tn:12, ip:9 },
+  "Abhinav Katti":      { ts:5, tn:12, ip:9 },
+  "Nakia Smith":        { ts:4, tn:14, ip:8 },
+  "Varun Pala":         { ts:5, tn:12, ip:9 },
+  "Satheesh Bokka":     { ts:4, tn:13, ip:9 },
+  "Briana Wasserstrom": { ts:5, tn:12, ip:9 },
+};
+
 function fresh(names = NAMES) {
   return {
-    physicians: names.map((name,i) => ({ id:i+1, name, ts:i<4?5:4, tn:13, ip:i<4?8:9 })),
+    physicians: names.map((name,i) => ({ id:i+1, name, ...(DEFAULTS[name] ?? { ts:5, tn:12, ip:9 }) })),
     pool: [],
     exchangeOpen: true,
     claimOpen: false,      // matching active (Round 2)
