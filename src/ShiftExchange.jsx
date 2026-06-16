@@ -28,14 +28,14 @@ const NAMES = [
 const DEFAULTS = {
   "Stephanie McNeill":  { ts:5, tn:12, ip:9 },
   "Christian Sonnefeld":{ ts:4, tn:13, ip:9 },
-  "Mary Hollist":       { ts:4, tn:13, ip:9 },
+  "Mary Hollist":       { ts:4, tn:14, ip:8 },
   "Eric Marin":         { ts:4, tn:14, ip:8 },
   "Harsh Patel":        { ts:5, tn:12, ip:9 },
   "Jay Madey":          { ts:4, tn:14, ip:8 },
   "Crystal Yu":         { ts:5, tn:12, ip:9 },
-  "Abhinav Katti":      { ts:5, tn:12, ip:9 },
+  "Abhinav Katti":      { ts:4, tn:13, ip:9 },
   "Nakia Smith":        { ts:4, tn:14, ip:8 },
-  "Varun Pala":         { ts:5, tn:12, ip:9 },
+  "Varun Pala":         { ts:4, tn:13, ip:9 },
   "Satheesh Bokka":     { ts:4, tn:13, ip:9 },
   "Briana Wasserstrom": { ts:5, tn:12, ip:9 },
 };
