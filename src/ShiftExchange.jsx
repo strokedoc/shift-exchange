@@ -63,34 +63,48 @@ function normEntry(p) {
   };
 }
 
-// Greedily settle offers, oldest-first, partial allowed. Each match moves shifts
-// only between the parties involved and decrements their orders, so nobody can
-// exceed what they declared. Direct 2-way swaps are settled first; any leftover
-// is then checked for 3-way cycles (A→B→C→A). With 3 shift types there are only
-// two possible cycles, so this stays bounded and deterministic.
+// Settle offers ONE shift at a time, water-filling fairly so scarce supply is
+// shared evenly across everyone competing for it instead of going first-come.
+// Each round, the next shift goes to the least-filled offer (`done` = units
+// already matched), ties broken oldest-first. Example: three people want CB→TN
+// for 8, 2 and 2 weeks but only 8 TN→CB exist — they settle 4 / 2 / 2 (each gets
+// an equal share; the remainder falls to the larger offer) rather than the first
+// offer taking all 8. This is max-min fairness: impartial to order and size.
+//
+// Each match moves shifts only between the parties involved and decrements their
+// orders, so nobody can exceed what they declared. Direct 2-way swaps are settled
+// first; any leftover is then checked for 3-way cycles (A→B→C→A). With 3 shift
+// types there are only two possible cycles, so this stays bounded and deterministic.
 function resolveMatches(state) {
   const physicians = state.physicians.map(p => ({ ...p }));
   const byId = Object.fromEntries(physicians.map(p => [p.id, p]));
-  let pool = (state.pool ?? []).map(e => ({ ...e }));
+  let pool = (state.pool ?? []).map(e => ({ ...e, done: 0 }));
 
-  const move = (offer, m) => { byId[offer.fromId][offer.giveType] -= m; byId[offer.fromId][offer.wantType] += m; offer.qty -= m; };
+  // Settle a single shift for one offer (one leg of a match).
+  const settle = (offer) => {
+    byId[offer.fromId][offer.giveType] -= 1;
+    byId[offer.fromId][offer.wantType] += 1;
+    offer.qty  -= 1;
+    offer.done += 1;
+  };
+  // Fairness order: least-filled first, then oldest. Re-evaluated every round so
+  // the share rotates evenly across competing offers (water-filling).
+  const fair = (a, b) => (a.done - b.done) || (a.at - b.at);
 
   let guard = 0, again = true;
   while (again && guard < 100000) {
     again = false;
     guard++;
-    pool.sort((a, b) => a.at - b.at);
+    const order = pool.filter(e => e.qty > 0).sort(fair);
 
     // 1) Direct pairwise swaps (preferred — only two people involved)
-    for (let i = 0; i < pool.length && !again; i++) {
-      const A = pool[i];
-      if (A.qty <= 0) continue;
-      for (let j = 0; j < pool.length; j++) {
-        const B = pool[j];
-        if (i === j || B.qty <= 0 || A.fromId === B.fromId) continue;
+    for (let a = 0; a < order.length && !again; a++) {
+      const A = order[a];
+      for (let b = 0; b < order.length; b++) {
+        const B = order[b];
+        if (A === B || B.qty <= 0 || A.fromId === B.fromId) continue;
         if (A.giveType === B.wantType && A.wantType === B.giveType) {
-          const m = Math.min(A.qty, B.qty);
-          move(A, m); move(B, m);
+          settle(A); settle(B);
           again = true;
           break;
         }
@@ -99,25 +113,23 @@ function resolveMatches(state) {
     if (again) continue;
 
     // 2) Three-way cycle: A gives x wants y, B gives y wants z, C gives z wants x
-    for (let i = 0; i < pool.length && !again; i++) {
-      const A = pool[i];
-      if (A.qty <= 0) continue;
-      for (let j = 0; j < pool.length && !again; j++) {
-        const B = pool[j];
-        if (B.qty <= 0 || B.fromId === A.fromId || B.giveType !== A.wantType) continue;
-        for (let k = 0; k < pool.length; k++) {
-          const C = pool[k];
-          if (C.qty <= 0 || C.fromId === A.fromId || C.fromId === B.fromId) continue;
+    for (let a = 0; a < order.length && !again; a++) {
+      const A = order[a];
+      for (let b = 0; b < order.length && !again; b++) {
+        const B = order[b];
+        if (B === A || B.qty <= 0 || B.fromId === A.fromId || B.giveType !== A.wantType) continue;
+        for (let c = 0; c < order.length; c++) {
+          const C = order[c];
+          if (C === A || C === B || C.qty <= 0 || C.fromId === A.fromId || C.fromId === B.fromId) continue;
           if (C.giveType !== B.wantType || C.wantType !== A.giveType) continue;
-          const m = Math.min(A.qty, B.qty, C.qty);
-          move(A, m); move(B, m); move(C, m);
+          settle(A); settle(B); settle(C);
           again = true;
           break;
         }
       }
     }
   }
-  pool = pool.filter(e => e.qty > 0);
+  pool = pool.filter(e => e.qty > 0).map(({ done, ...e }) => e);
   return { ...state, physicians, pool };
 }
 
